@@ -19,8 +19,23 @@ DIR            = os.path.dirname(os.path.abspath(__file__))
 ACCOUNTS_FILE  = os.path.join(DIR, "accounts.json")
 SEEN_FILE      = os.path.join(DIR, "seen_tweets.json")
 CHECK_INTERVAL = 120   # segundos entre ciclos (modo --loop)
-SEEN_MAX       = 3000  # max IDs guardados
-GROQ_MODEL     = "llama-3.1-8b-instant"
+SEEN_MAX        = 3000  # max IDs guardados
+GROQ_MODEL      = "llama-3.1-8b-instant"
+GROQ_CALL_DELAY = 2     # segundos entre llamadas Groq (evita rate limit)
+
+# Pre-filtro: solo manda a Groq tweets con alguna de estas palabras
+MARKET_KEYWORDS = {
+    "tariff","tariffs","trade","sanction","sanctions","rate","rates","interest",
+    "inflation","gdp","recession","deficit","debt","fed","fomc","powell",
+    "reserve","treasury","fiscal","monetary","tax","taxes","stimulus","bailout",
+    "budget","economy","economic","market","stock","stocks","nasdaq","s&p",
+    "sp500","dow","futures","equity","earnings","revenue","profit","ipo",
+    "buyback","bitcoin","btc","crypto","ethereum","stablecoin","blockchain",
+    "oil","gold","dollar","yuan","currency","war","iran","china","russia",
+    "opec","nuclear","ban","restrict","regulation","sec","cftc","policy",
+    "executive","billion","trillion","deal","merger","acquisition","layoff",
+    "chip","semiconductor","nvidia","openai","tarifa","arancel","economia",
+}
 
 NITTER_INSTANCES = [
     "nitter.net",
@@ -165,7 +180,14 @@ def run_cycle(accounts, client, tg_token, tg_chat, seen) -> int:
             if not text or len(text) < 15:
                 continue
 
+            # Pre-filtro keywords — evita llamadas Groq innecesarias
+            text_lower = text.lower()
+            if not any(kw in text_lower for kw in MARKET_KEYWORDS):
+                print(f"  @{handle}: sin keywords — skip")
+                continue
+
             print(f"  @{handle}: {text[:65]}...")
+            time.sleep(GROQ_CALL_DELAY)
             analysis = analyze_tweet(text, name, handle, client)
             if not analysis:
                 continue
