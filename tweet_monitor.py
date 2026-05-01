@@ -488,10 +488,24 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
 
         msg  = build_confluence_message(unique_sigs, ev)
         sent = send_telegram(tg_token, tg_chat, msg)
-        print(f"    -> {'CONFLUENCIA enviada' if sent else 'ERROR Telegram'} ({len(sigs)} traders)")
+        print(f"    -> {'CONFLUENCIA enviada' if sent else 'ERROR Telegram'} ({len(unique_sigs)} traders)")
         if sent:
             confluenced_keys.add(ckey)
             alerts += 1
+
+            # Ejecutar orden en broker si está configurado
+            from broker import execute_signal
+            broker_status = execute_signal(
+                instrument = ev.get("INSTRUMENTO", instrument),
+                direction  = ev.get("DIRECCION",  direction),
+                entrada    = ev.get("ENTRADA",    "N/A"),
+                tp         = ev.get("TP",         "N/A"),
+                sl         = ev.get("SL",         "N/A"),
+                calidad    = ev.get("CALIDAD",    "MEDIA"),
+            )
+            print(f"    -> BROKER: {broker_status}")
+            send_telegram(tg_token, tg_chat,
+                f"🤖 <b>Broker:</b> <code>{broker_status}</code>")
 
     return alerts
 
