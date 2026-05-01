@@ -1,0 +1,8 @@
+[
+  { "handle": "realDonaldTrump",  "name": "Donald Trump" },
+  { "handle": "elonmusk",         "name": "Elon Musk" },
+  { "handle": "federalreserve",   "name": "Federal Reserve" },
+  { "handle": "SecBessent",       "name": "Bessent (Tesoro EEUU)" },
+  { "handle": "JPowell_Fed",      "name": "Jerome Powell" },
+  { "handle": "WhiteHouse",       "name": "White House" }
+]
