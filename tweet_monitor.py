@@ -52,6 +52,7 @@ SIGNAL_KEYWORDS = {
     "holding", "loaded", "calls", "puts", "alert", "watch", "level",
     "nq", "nasdaq", "es", "sp500", "s&p", "btc", "bitcoin", "eth",
     "largo", "corto", "compra", "venta",
+    "xau", "gold", "oro", "silver", "plata", "metals", "metales", "gc",
 }
 
 NITTER_INSTANCES = [
@@ -173,7 +174,7 @@ Responde SENAL: SI SOLO si el trader esta dando una señal ACTIVA Y ACCIONABLE A
 
 Formato si es SI:
 SENAL: SI
-INSTRUMENTO: NQ o ES o BTC o ETH o GC o CL o otro
+INSTRUMENTO: NQ o ES o BTC o ETH o XAU o GC o CL o DXY o otro
 DIRECCION: LARGO o CORTO
 ENTRADA: [precio numerico o rango, ej: 19500 o 19500-19550. Si no hay precio: N/A]
 TP: [precio numerico objetivo, o N/A]
@@ -452,6 +453,10 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             }
             signals_buffer.append(entry)
 
+            # Registrar en tracker de aciertos
+            from stats import add_pending_signal
+            add_pending_signal(entry)
+
     # Limpiar señales antiguas
     signals_buffer[:] = clean_buffer(signals_buffer)
 
@@ -545,15 +550,16 @@ def main():
             ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
             print(f"\n[{ts}] Ciclo #{cycle}")
             try:
-                n_news = run_news_cycle(accounts, client, tg_token, tg_chat, seen)
-                n_sigs = run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
-                                          seen, signals_buffer, confluenced_keys)
+                n_news  = run_news_cycle(accounts, client, tg_token, tg_chat, seen)
+                n_sigs  = run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
+                                           seen, signals_buffer, confluenced_keys)
+                from stats import run_stats_cycle
+                n_eval  = run_stats_cycle(tg_token, tg_chat, send_telegram)
                 save_seen(seen)
                 save_signals_buffer(signals_buffer)
                 save_confluenced(confluenced_keys)
-                total = n_news + n_sigs
-                if total:
-                    print(f"  {n_news} noticias + {n_sigs} confluencias")
+                if n_news or n_sigs or n_eval:
+                    print(f"  {n_news} noticias | {n_sigs} confluencias | {n_eval} señales evaluadas")
             except Exception as e:
                 print(f"  Error: {e}")
             time.sleep(CHECK_INTERVAL)

@@ -28,5 +28,14 @@
   {"handle": "inversebrah",     "name": "Inversebrah",              "focus": "Crypto/Macro"},
   {"handle": "GerberKawasaki",  "name": "Gerber Kawasaki",          "focus": "Stocks/Tech"},
   {"handle": "MasiTrades",      "name": "Masi",                     "focus": "Options"},
-  {"handle": "sjosephburns",    "name": "Steve Burns",              "focus": "Stocks/Systematic"}
+  {"handle": "sjosephburns",    "name": "Steve Burns",              "focus": "Stocks/Systematic"},
+
+  {"handle": "TradersXauusd",   "name": "XAUUSD Traders",           "focus": "XAU/Gold"},
+  {"handle": "GarethSoloway",   "name": "Gareth Soloway",           "focus": "XAU/Stocks/Crypto"},
+  {"handle": "TaviCosta",       "name": "Tavi Costa (Crescat)",     "focus": "XAU/Macro"},
+  {"handle": "LynAldenContact", "name": "Lyn Alden",                "focus": "XAU/Macro/BTC"},
+  {"handle": "GoldTelegraph_",  "name": "Gold Telegraph",           "focus": "XAU/Gold"},
+  {"handle": "SchiffGold",      "name": "Peter Schiff (SchiffGold)","focus": "XAU/Gold"},
+  {"handle": "MacroAlf",        "name": "Alfonso Peccatiello",      "focus": "XAU/Macro/Rates"},
+  {"handle": "SharperTrades",   "name": "Sharper Trades",           "focus": "XAU/Metals/Futures"}
 ]
