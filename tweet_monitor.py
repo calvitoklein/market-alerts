@@ -28,7 +28,7 @@ SEEN_MAX             = 3000
 GROQ_MODEL           = "llama-3.1-8b-instant"
 GROQ_CALL_DELAY      = 2      # segundos entre llamadas Groq
 SIGNAL_WINDOW_HOURS  = 3      # ventana de tiempo para confluencia
-MIN_CONFLUENCE       = 2      # mínimo de traders para disparar alerta
+MIN_CONFLUENCE       = 3      # mínimo de traders DISTINTOS para disparar alerta
 
 # Pre-filtro: noticias de mercado
 MARKET_KEYWORDS = {
@@ -158,22 +158,30 @@ def analyze_tweet(text: str, name: str, handle: str, client: Groq) -> dict | Non
 
 # ── Extraccion de señales de trading ─────────────────────────────────────────
 
-SIGNAL_EXTRACT_PROMPT = """Analiza este tweet del trader {name} (@{handle}) y extrae la señal de trading si la contiene.
+SIGNAL_EXTRACT_PROMPT = """Analiza este tweet del trader {name} (@{handle}).
 
 Tweet: "{text}"
 
-Si NO es una señal de trading con direccion concreta (largo/corto/compra/venta), responde solo:
-SENAL: NO
+Responde SENAL: NO si el tweet es cualquiera de estos casos:
+- Comentario general, opinion, analisis sin accion concreta
+- Precio historico o prediccion a largo plazo (meses/años)
+- Referencia a operacion ya cerrada
+- Noticia de mercado sin señal de entrada
+- No dice explicitamente long/short/buy/sell/largo/corto/compra/venta
 
-Si ES una señal de trading, responde EXACTAMENTE en este formato:
+Responde SENAL: SI SOLO si el trader esta dando una señal ACTIVA Y ACCIONABLE AHORA con direccion clara.
+
+Formato si es SI:
 SENAL: SI
-INSTRUMENTO: [NQ / ES / BTC / ETH / GC / CL / DXY / otro]
+INSTRUMENTO: NQ o ES o BTC o ETH o GC o CL o otro
 DIRECCION: LARGO o CORTO
-ENTRADA: [precio o rango, ej: 19500 o 19500-19550, o MERCADO]
-TP: [precio objetivo o N/A]
-SL: [stop loss o N/A]
+ENTRADA: [precio numerico o rango, ej: 19500 o 19500-19550. Si no hay precio: N/A]
+TP: [precio numerico objetivo, o N/A]
+SL: [precio numerico stop loss, o N/A]
 CONFIANZA_TRADER: BAJA o MEDIA o ALTA
-RESUMEN: [max 10 palabras en espanol describiendo la señal]"""
+RESUMEN: [max 8 palabras en espanol]
+
+Si no hay precio de entrada especifico, es muy probable que NO sea una señal valida."""
 
 def extract_signal(text: str, name: str, handle: str, client: Groq) -> dict | None:
     try:
@@ -201,15 +209,15 @@ CONFLUENCE_EVAL_PROMPT = """Varios traders publicaron señales de {instrument} {
 
 {signals_text}
 
-Evalua la confluencia y calidad de esta operacion potencial:
-INSTRUMENTO: [instrumento]
-DIRECCION: LARGO o CORTO
-TRADERS_ACUERDO: [X de Y]
+Evalua y responde EXACTAMENTE en este formato (sin texto extra):
+INSTRUMENTO: {instrument}
+DIRECCION: {direction}
+TRADERS: {n} de {n}
 CALIDAD: BAJA o MEDIA o ALTA
-ENTRADA_CONSENSO: [precio o rango consensuado]
-TP_CONSENSO: [precio objetivo consensuado o N/A]
-SL_CONSENSO: [stop consensuado o N/A]
-RAZON: [max 15 palabras en espanol explicando la confluencia]
+ENTRADA: [precio o rango consensuado entre los traders]
+TP: [precio objetivo consensuado o N/A]
+SL: [stop loss consensuado o N/A]
+RAZON: [max 15 palabras en espanol]
 RECOMENDACION: OPERAR o ESPERAR o EVITAR"""
 
 def evaluate_confluence(signals: list, client: Groq) -> dict | None:
@@ -234,6 +242,7 @@ def evaluate_confluence(signals: list, client: Groq) -> dict | None:
                     direction=direction,
                     hours=SIGNAL_WINDOW_HOURS,
                     signals_text=signals_text,
+                    n=len(signals),
                 )}],
             max_tokens=180,
             temperature=0.1,
@@ -243,7 +252,7 @@ def evaluate_confluence(signals: list, client: Groq) -> dict | None:
         for line in raw.split("\n"):
             if ":" in line:
                 k, _, v = line.partition(":")
-                result[k.strip()] = v.strip()
+                result[k.strip().upper()] = v.strip()
         return result
     except Exception as e:
         print(f"    Groq error (confluence): {e}")
@@ -287,11 +296,11 @@ def build_confluence_message(signals: list, ev: dict) -> str:
     now        = datetime.now(timezone.utc).strftime("%H:%M UTC")
     instrument = ev.get("INSTRUMENTO", signals[0].get("INSTRUMENTO", "?"))
     direction  = ev.get("DIRECCION", signals[0].get("DIRECCION", "?"))
-    acuerdo    = ev.get("TRADERS_ACUERDO", f"{len(signals)}/{len(signals)}")
-    calidad    = ev.get("CALIDAD", "?")
-    entrada    = ev.get("ENTRADA_CONSENSO", "?")
-    tp         = ev.get("TP_CONSENSO", "N/A")
-    sl         = ev.get("SL_CONSENSO", "N/A")
+    acuerdo    = ev.get("TRADERS", f"{len(signals)} de {len(signals)}")
+    calidad    = ev.get("CALIDAD", "MEDIA")
+    entrada    = ev.get("ENTRADA", "ver traders")
+    tp         = ev.get("TP", "N/A")
+    sl         = ev.get("SL", "N/A")
     razon      = ev.get("RAZON", "")
     rec        = ev.get("RECOMENDACION", "ESPERAR")
 
@@ -423,7 +432,13 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                 print(f"    -> no es señal")
                 continue
 
-            print(f"    -> SEÑAL {sig.get('INSTRUMENTO','?')} {sig.get('DIRECCION','?')} entrada={sig.get('ENTRADA','?')}")
+            entrada = sig.get("ENTRADA", "N/A").strip()
+            # Descartar señales sin precio concreto
+            if entrada.upper() in ("N/A", "", "?", "NONE", "NO"):
+                print(f"    -> señal sin precio de entrada — skip")
+                continue
+
+            print(f"    -> SEÑAL {sig.get('INSTRUMENTO','?')} {sig.get('DIRECCION','?')} entrada={entrada}")
 
             entry = {
                 "ts":       now_iso,
@@ -449,23 +464,29 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             groups[f"{instr}_{direc}"].append(s)
 
     for group_key, sigs in groups.items():
-        if len(sigs) < MIN_CONFLUENCE:
+        # Deduplicar: un solo voto por trader (el más reciente)
+        latest_per_handle: dict = {}
+        for s in sorted(sigs, key=lambda x: x["ts"]):
+            latest_per_handle[s["handle"]] = s
+        unique_sigs = list(latest_per_handle.values())
+
+        if len(unique_sigs) < MIN_CONFLUENCE:
             continue
 
-        instrument = sigs[0].get("INSTRUMENTO", "?")
-        direction  = sigs[0].get("DIRECCION", "?")
-        ckey = get_confluence_key(instrument, direction, sigs)
+        instrument = unique_sigs[0].get("INSTRUMENTO", "?")
+        direction  = unique_sigs[0].get("DIRECCION", "?")
+        ckey = get_confluence_key(instrument, direction, unique_sigs)
 
         if ckey in confluenced_keys:
             continue  # ya alertado para esta combinacion exacta
 
-        print(f"  >> CONFLUENCIA {instrument} {direction} — {len(sigs)} traders")
+        print(f"  >> CONFLUENCIA {instrument} {direction} — {len(unique_sigs)} traders distintos")
         time.sleep(GROQ_CALL_DELAY)
-        ev = evaluate_confluence(sigs, client)
+        ev = evaluate_confluence(unique_sigs, client)
         if not ev:
             continue
 
-        msg  = build_confluence_message(sigs, ev)
+        msg  = build_confluence_message(unique_sigs, ev)
         sent = send_telegram(tg_token, tg_chat, msg)
         print(f"    -> {'CONFLUENCIA enviada' if sent else 'ERROR Telegram'} ({len(sigs)} traders)")
         if sent:
