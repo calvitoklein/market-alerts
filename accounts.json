@@ -1,8 +1,22 @@
 [
-  { "handle": "realDonaldTrump",  "name": "Donald Trump" },
-  { "handle": "elonmusk",         "name": "Elon Musk" },
-  { "handle": "federalreserve",   "name": "Federal Reserve" },
-  { "handle": "SecBessent",       "name": "Bessent (Tesoro EEUU)" },
-  { "handle": "JPowell_Fed",      "name": "Jerome Powell" },
-  { "handle": "WhiteHouse",       "name": "White House" }
+  {"handle": "realDonaldTrump",  "name": "Donald Trump",               "categoria": "politica"},
+  {"handle": "WhiteHouse",       "name": "White House",                "categoria": "politica"},
+  {"handle": "SecBessent",       "name": "Scott Bessent (Tesoro)",     "categoria": "politica"},
+  {"handle": "USTreasury",       "name": "US Treasury",                "categoria": "politica"},
+  {"handle": "USTradeRep",       "name": "US Trade Rep (USTR)",        "categoria": "politica"},
+  {"handle": "federalreserve",   "name": "Federal Reserve",            "categoria": "fed"},
+  {"handle": "SECGov",           "name": "SEC",                        "categoria": "regulador"},
+  {"handle": "elonmusk",         "name": "Elon Musk",                  "categoria": "tech"},
+  {"handle": "satyanadella",     "name": "Satya Nadella (Microsoft)",  "categoria": "tech"},
+  {"handle": "sundarpichai",     "name": "Sundar Pichai (Google)",     "categoria": "tech"},
+  {"handle": "jeffbezos",        "name": "Jeff Bezos (Amazon)",        "categoria": "tech"},
+  {"handle": "tim_cook",         "name": "Tim Cook (Apple)",           "categoria": "tech"},
+  {"handle": "michael_saylor",   "name": "Michael Saylor (MSTR)",      "categoria": "crypto"},
+  {"handle": "coinbase",         "name": "Coinbase",                   "categoria": "crypto"},
+  {"handle": "binance",          "name": "Binance",                    "categoria": "crypto"},
+  {"handle": "CathieDWood",      "name": "Cathie Wood (ARK)",          "categoria": "inversores"},
+  {"handle": "RayDalio",         "name": "Ray Dalio",                  "categoria": "inversores"},
+  {"handle": "markets",          "name": "Bloomberg Markets",          "categoria": "noticias"},
+  {"handle": "WSJmarkets",       "name": "WSJ Markets",                "categoria": "noticias"},
+  {"handle": "unusual_whales",   "name": "Unusual Whales",             "categoria": "noticias"}
 ]

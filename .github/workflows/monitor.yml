@@ -2,7 +2,7 @@ name: Twitter Market Monitor
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # cada 15 minutos, 24/7
+    - cron: '*/5 * * * *'    # cada 5 minutos, 24/7
   workflow_dispatch:           # también se puede lanzar manualmente
 
 jobs:
