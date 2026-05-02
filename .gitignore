@@ -4,6 +4,7 @@ __pycache__/
 *.db
 twitter_cookies.json
 seen_tweets.json
+insider_seen.json
 signals_buffer.json
 confluenced_keys.json
 pending_results.json

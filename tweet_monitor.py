@@ -382,6 +382,19 @@ def build_confluence_message(signals: list, ev: dict) -> str:
         f"{signal_links}"
     )
 
+INSIDER_SEEN_FILE = os.path.join(DIR, "insider_seen.json")
+
+def load_insider_seen() -> set:
+    try:
+        with open(INSIDER_SEEN_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def save_insider_seen(seen: set):
+    with open(INSIDER_SEEN_FILE, "w") as f:
+        json.dump(list(seen)[-2000:], f)
+
 def send_telegram(token: str, chat_id: str, text: str) -> bool:
     try:
         r = requests.post(
@@ -654,6 +667,62 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
 
     return alerts
 
+# ── Ciclo de insiders (congresistas + Form 4) ─────────────────────────────────
+
+def run_insider_cycle(tg_token: str, tg_chat: str, insider_seen: set) -> int:
+    """
+    Revisa operaciones de congresistas (QuiverQuant) y cluster buys de insiders
+    (OpenInsider). Solo alerta sobre tickers relevantes para nuestros instrumentos.
+    """
+    alerts = 0
+    try:
+        from insider_signals import (
+            fetch_congress_trades, fetch_insider_cluster_buys,
+            build_congress_alert, build_cluster_alert,
+        )
+    except Exception as e:
+        print(f"  [insider] import error: {e}")
+        return 0
+
+    # ── Congresistas ────────────────────────────────────────────────────────
+    try:
+        congress = fetch_congress_trades(days=2)
+        relevant = [t for t in congress if t["is_relevant"]]
+        for t in relevant:
+            key = f"cong_{t['representative']}_{t['ticker']}_{t['trade_date']}"
+            if key in insider_seen:
+                continue
+            insider_seen.add(key)
+            msg = build_congress_alert(t)
+            sent = send_telegram(tg_token, tg_chat, msg)
+            star = "⭐ " if t.get("is_star") else ""
+            print(f"  [CONGRESS] {star}{t['representative']} compró {t['ticker']} {t['amount_raw']} — {'✓' if sent else 'ERR'}")
+            if sent:
+                alerts += 1
+    except Exception as e:
+        print(f"  [insider] congress error: {e}")
+
+    # ── Cluster buys ────────────────────────────────────────────────────────
+    try:
+        clusters = fetch_insider_cluster_buys(days=2, min_insiders=3)
+        relevant_clusters = [c for c in clusters if c["is_relevant"] or c["n_insiders"] >= 5]
+        for c in relevant_clusters:
+            key = f"cluster_{c['ticker']}_{c['trade_date']}_{c['n_insiders']}"
+            if key in insider_seen:
+                continue
+            insider_seen.add(key)
+            msg = build_cluster_alert(c)
+            sent = send_telegram(tg_token, tg_chat, msg)
+            val = f"${c['value']:,.0f}" if c.get("value") else "?"
+            print(f"  [CLUSTER] {c['n_insiders']} insiders {c['ticker']} {val} — {'✓' if sent else 'ERR'}")
+            if sent:
+                alerts += 1
+    except Exception as e:
+        print(f"  [insider] cluster error: {e}")
+
+    return alerts
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -685,6 +754,7 @@ def main():
     seen            = load_seen()
     signals_buffer  = load_signals_buffer()
     confluenced_keys = load_confluenced()
+    insider_seen    = load_insider_seen()
 
     if loop_mode:
         send_telegram(tg_token, tg_chat,
@@ -699,13 +769,15 @@ def main():
                 n_news  = run_news_cycle(accounts, client, tg_token, tg_chat, seen)
                 n_sigs  = run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                                            seen, signals_buffer, confluenced_keys)
+                n_ins   = run_insider_cycle(tg_token, tg_chat, insider_seen)
                 from stats import run_stats_cycle
                 n_eval  = run_stats_cycle(tg_token, tg_chat, send_telegram)
                 save_seen(seen)
                 save_signals_buffer(signals_buffer)
                 save_confluenced(confluenced_keys)
-                if n_news or n_sigs or n_eval:
-                    print(f"  {n_news} noticias | {n_sigs} confluencias | {n_eval} señales evaluadas")
+                save_insider_seen(insider_seen)
+                if n_news or n_sigs or n_eval or n_ins:
+                    print(f"  {n_news} noticias | {n_sigs} confluencias | {n_ins} insiders | {n_eval} señales evaluadas")
             except Exception as e:
                 print(f"  Error: {e}")
             time.sleep(CHECK_INTERVAL)
@@ -714,10 +786,12 @@ def main():
         n_news = run_news_cycle(accounts, client, tg_token, tg_chat, seen)
         n_sigs = run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                                   seen, signals_buffer, confluenced_keys)
+        n_ins  = run_insider_cycle(tg_token, tg_chat, insider_seen)
         save_seen(seen)
         save_signals_buffer(signals_buffer)
         save_confluenced(confluenced_keys)
-        print(f"=== Fin: {n_news} noticias + {n_sigs} confluencias ===")
+        save_insider_seen(insider_seen)
+        print(f"=== Fin: {n_news} noticias + {n_sigs} confluencias + {n_ins} insiders ===")
 
 if __name__ == "__main__":
     main()
