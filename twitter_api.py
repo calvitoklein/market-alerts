@@ -90,6 +90,12 @@ class TwitterAPI:
 
     @classmethod
     def from_env(cls) -> "TwitterAPI | None":
+        # 1. Env vars (GitHub Actions secrets)
+        auth = os.environ.get("TWITTER_AUTH_TOKEN", "")
+        ct0  = os.environ.get("TWITTER_CT0", "")
+        if auth and ct0:
+            return cls(auth, ct0)
+        # 2. Local cookies file
         if os.path.exists(COOKIES_FILE):
             try:
                 return cls.from_file()
@@ -205,7 +211,7 @@ def save_cookies(auth_token: str, ct0: str):
 
 
 def is_configured() -> bool:
-    return os.path.exists(COOKIES_FILE)
+    return (bool(os.environ.get("TWITTER_AUTH_TOKEN")) or os.path.exists(COOKIES_FILE))
 
 
 if __name__ == "__main__":
