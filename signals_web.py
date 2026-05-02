@@ -64,6 +64,11 @@ TELEGRAM_CHANNELS = {
     "ICT Traders":          "ict_traders",           # XAUUSD SELL@4558 TP 4528 SL 4573
     "XAUUSD Signals":       "xauusd_signals",        # XAU/DXY/EURUSD ENTER/SL/TP
 
+    # ── Gold + Forex multiactivo ──────────────────────────────────────────────
+    "Gold Forex VIP":       "gold_forex_signals_vip", # XAU/DXY/ETH ENTER+SL+TP, activo diario
+    "United Signals FX":    "UnitedSignalsFX",        # EURUSD/USDJPY Entry+SL+TP, +PIPS cerrados
+    "Anabel Signals":       "anabelsignals",           # Gold/Silver/BTC SL+TP, activo diario
+
     # ── Indices (NQ/ES/DAX) ──────────────────────────────────────────────────
     "Quant Signals":        "quant_signals",         # US_TECH100 BUY@27376 + TRADE CLOSED
     "ES Signals":           "es_signals",            # ES 1m stop levels
