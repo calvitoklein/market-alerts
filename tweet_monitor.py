@@ -11,6 +11,7 @@ import json
 import time
 import feedparser
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from groq import Groq
@@ -24,11 +25,13 @@ SEEN_FILE            = os.path.join(DIR, "seen_tweets.json")
 SIGNALS_BUFFER_FILE  = os.path.join(DIR, "signals_buffer.json")
 CONFLUENCED_FILE     = os.path.join(DIR, "confluenced_keys.json")
 
-CHECK_INTERVAL       = 120    # segundos entre ciclos (modo --loop)
-SEEN_MAX             = 3000
+CHECK_INTERVAL       = 300    # segundos entre ciclos — 5 min para listas grandes
+SEEN_MAX             = 5000
 GROQ_MODEL           = "llama-3.1-8b-instant"
-GROQ_CALL_DELAY      = 2      # segundos entre llamadas Groq
-SIGNAL_WINDOW_HOURS  = 3      # ventana de tiempo para confluencia
+GROQ_CALL_DELAY      = 1      # segundos entre llamadas Groq
+FETCH_WORKERS        = 25     # hilos paralelos para fetch de RSS
+TWEETS_PER_ACCOUNT   = 4      # tweets a revisar por cuenta
+SIGNAL_WINDOW_HOURS  = 4      # ventana de tiempo para confluencia
 MIN_CONFLUENCE       = 3      # mínimo de traders DISTINTOS para disparar alerta
 
 # Pre-filtro: noticias de mercado
@@ -109,10 +112,24 @@ def fetch_tweets(handle: str) -> list:
             feed = feedparser.parse(f"https://{instance}/{handle}/rss",
                                     request_headers=headers)
             if feed.entries:
-                return feed.entries[:8]
+                return feed.entries[:TWEETS_PER_ACCOUNT]
         except Exception:
             continue
     return []
+
+def fetch_all_parallel(accounts: list) -> dict:
+    """Fetches tweets for all accounts in parallel. Returns {handle: (acc, tweets)}."""
+    results = {}
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+        future_map = {ex.submit(fetch_tweets, acc["handle"]): acc for acc in accounts}
+        for future in as_completed(future_map):
+            acc = future_map[future]
+            try:
+                tweets = future.result(timeout=12)
+            except Exception:
+                tweets = []
+            results[acc["handle"]] = (acc, tweets)
+    return results
 
 # ── Análisis de noticias con Groq ─────────────────────────────────────────────
 
@@ -362,11 +379,9 @@ def send_telegram(token: str, chat_id: str, text: str) -> bool:
 
 def run_news_cycle(accounts, client, tg_token, tg_chat, seen) -> int:
     alerts = 0
-    for acc in accounts:
-        handle = acc["handle"]
-        name   = acc["name"]
-        tweets = fetch_tweets(handle)
-
+    fetched = fetch_all_parallel(accounts)
+    for handle, (acc, tweets) in fetched.items():
+        name = acc["name"]
         for tw in tweets:
             tid = tw.get("id") or tw.get("link", "")
             if not tid or tid in seen:
@@ -446,11 +461,9 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     alerts = 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    for acc in signal_accounts:
-        handle = acc["handle"]
-        name   = acc["name"]
-        tweets = fetch_tweets(handle)
-
+    fetched = fetch_all_parallel(signal_accounts)
+    for handle, (acc, tweets) in fetched.items():
+        name = acc["name"]
         for tw in tweets:
             tid = f"sig_{tw.get('id') or tw.get('link', '')}"
             if not tid or tid in seen:
@@ -597,8 +610,8 @@ def main():
 
     if loop_mode:
         send_telegram(tg_token, tg_chat,
-            f"Monitor arrancado — {len(accounts)} cuentas noticias + {len(signal_accounts)} traders de señales | cada {CHECK_INTERVAL//60} min")
-        print(f"=== Modo continuo | {len(accounts)} noticias + {len(signal_accounts)} señales | cada {CHECK_INTERVAL}s ===")
+            f"Monitor arrancado — {len(accounts)} noticias + {len(signal_accounts)} traders | cada {CHECK_INTERVAL//60} min | {FETCH_WORKERS} hilos paralelos")
+        print(f"=== Modo continuo | {len(accounts)} noticias + {len(signal_accounts)} señales | cada {CHECK_INTERVAL}s | {FETCH_WORKERS} workers ===")
         cycle = 0
         while True:
             cycle += 1
