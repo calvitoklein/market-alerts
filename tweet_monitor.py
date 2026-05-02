@@ -5,6 +5,7 @@ Twitter/X Market Alert Monitor + Signal Confluence Tracker
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -180,8 +181,10 @@ ENTRADA: [precio numerico o rango, ej: 19500 o 19500-19550. Si no hay precio: N/
 TP: [precio numerico objetivo, o N/A]
 SL: [precio numerico stop loss, o N/A]
 CONFIANZA_TRADER: BAJA o MEDIA o ALTA
+HORIZONTE: SCALP (minutos-horas) o DIA (hasta 24h) o SWING (dias-semanas) o POSICION (semanas-meses)
 RESUMEN: [max 8 palabras en espanol]
 
+Guia HORIZONTE: scalp/quick/immediate=SCALP, intraday/today/hoy=DIA, swing/weekly/dias=SWING, position/hold/months=POSICION
 Si no hay precio de entrada especifico, es muy probable que NO sea una señal valida."""
 
 def extract_signal(text: str, name: str, handle: str, client: Groq) -> dict | None:
@@ -293,24 +296,35 @@ def build_news_message(name, handle, text, a, link):
         f"<a href='{link}'>Ver tweet original</a>"
     )
 
+HORIZONTE_EMOJI = {"SCALP": "⚡", "DIA": "📅", "SWING": "📆", "POSICION": "📌"}
+HORIZONTE_LABEL = {"SCALP": "Scalp (min-h)", "DIA": "Intraday (24h)",
+                   "SWING": "Swing (dias-semanas)", "POSICION": "Posicion (semanas-meses)"}
+
 def build_confluence_message(signals: list, ev: dict) -> str:
     now        = datetime.now(timezone.utc).strftime("%H:%M UTC")
     instrument = ev.get("INSTRUMENTO", signals[0].get("INSTRUMENTO", "?"))
-    direction  = ev.get("DIRECCION", signals[0].get("DIRECCION", "?"))
-    acuerdo    = ev.get("TRADERS", f"{len(signals)} de {len(signals)}")
-    calidad    = ev.get("CALIDAD", "MEDIA")
-    entrada    = ev.get("ENTRADA", "ver traders")
-    tp         = ev.get("TP", "N/A")
-    sl         = ev.get("SL", "N/A")
-    razon      = ev.get("RAZON", "")
-    rec        = ev.get("RECOMENDACION", "ESPERAR")
+    direction  = ev.get("DIRECCION",   signals[0].get("DIRECCION", "?"))
+    acuerdo    = ev.get("TRADERS",     f"{len(signals)} de {len(signals)}")
+    calidad    = ev.get("CALIDAD",     "MEDIA")
+    entrada    = ev.get("ENTRADA",     "ver traders")
+    tp         = ev.get("TP",          "N/A")
+    sl         = ev.get("SL",          "N/A")
+    razon      = ev.get("RAZON",       "")
+    rec        = ev.get("RECOMENDACION","ESPERAR")
+
+    # Horizonte mayoritario entre las señales
+    horizontes  = [s.get("HORIZONTE", "DIA").upper() for s in signals]
+    horizonte   = max(set(horizontes), key=horizontes.count)
+    hor_em      = HORIZONTE_EMOJI.get(horizonte, "")
+    hor_label   = HORIZONTE_LABEL.get(horizonte, horizonte)
 
     dir_str  = DIR_SIGNAL.get(direction, direction)
     qual_em  = QUAL_EMOJI.get(calidad, "")
     rec_em   = REC_EMOJI.get(rec, "")
 
     traders_lines = "\n".join(
-        f"• @{s['handle']} — Entrada {s.get('ENTRADA','?')} | TP {s.get('TP','N/A')} | SL {s.get('SL','N/A')}"
+        f"• @{s['handle']} [{s.get('HORIZONTE','?')}] — "
+        f"Entrada {s.get('ENTRADA','?')} | TP {s.get('TP','N/A')} | SL {s.get('SL','N/A')}"
         for s in signals
     )
     signal_links = "  ".join(
@@ -319,7 +333,8 @@ def build_confluence_message(signals: list, ev: dict) -> str:
 
     return (
         f"⚡{qual_em} <b>CONFLUENCIA DE SEÑALES</b> · {now}\n\n"
-        f"<b>{instrument} {dir_str}</b> — {acuerdo} traders de acuerdo\n\n"
+        f"<b>{instrument} {dir_str}</b> — {acuerdo} traders\n"
+        f"{hor_em} <i>{hor_label}</i>\n\n"
         f"<pre>"
         f"Entrada  {entrada:>20}\n"
         f"TP       {tp:>20}\n"
@@ -393,6 +408,31 @@ def run_news_cycle(accounts, client, tg_token, tg_chat, seen) -> int:
 
 # ── Ciclo de señales de traders ───────────────────────────────────────────────
 
+def extract_image_url(tw_entry) -> str | None:
+    for m in tw_entry.get("media_content", []):
+        if m.get("type", "").startswith("image"):
+            return m.get("url")
+    for e in tw_entry.get("enclosures", []):
+        if e.get("type", "").startswith("image"):
+            return e.get("href") or e.get("url")
+    # Nitter pone imágenes como <img src="..."> en el summary HTML
+    summary = tw_entry.get("summary", "")
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary, re.IGNORECASE)
+    return m.group(1) if m else None
+
+def send_telegram_photo(token: str, chat_id: str, photo_url: str, caption: str) -> bool:
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            json={"chat_id": chat_id, "photo": photo_url,
+                  "caption": caption, "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=15,
+        )
+        return r.ok
+    except Exception:
+        return False
+
 def clean_buffer(buf: list) -> list:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=SIGNAL_WINDOW_HOURS)
     return [s for s in buf if datetime.fromisoformat(s["ts"]) >= cutoff]
@@ -441,15 +481,18 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
 
             print(f"    -> SEÑAL {sig.get('INSTRUMENTO','?')} {sig.get('DIRECCION','?')} entrada={entrada}")
 
+            img_url = extract_image_url(tw)
             entry = {
                 "ts":       now_iso,
                 "id":       tid,
                 "handle":   handle,
                 "name":     name,
                 "link":     link,
+                "img":      img_url or "",
                 "text":     text[:300],
                 **{k: sig.get(k, "") for k in
-                   ["INSTRUMENTO","DIRECCION","ENTRADA","TP","SL","CONFIANZA_TRADER","RESUMEN"]},
+                   ["INSTRUMENTO","DIRECCION","ENTRADA","TP","SL",
+                    "CONFIANZA_TRADER","HORIZONTE","RESUMEN"]},
             }
             signals_buffer.append(entry)
 
@@ -492,13 +535,24 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             continue
 
         msg  = build_confluence_message(unique_sigs, ev)
-        sent = send_telegram(tg_token, tg_chat, msg)
-        print(f"    -> {'CONFLUENCIA enviada' if sent else 'ERROR Telegram'} ({len(unique_sigs)} traders)")
+
+        # Buscar imagen de algún trader del grupo para adjuntar
+        img_url = next((s["img"] for s in unique_sigs if s.get("img")), None)
+        if img_url:
+            sent = send_telegram_photo(tg_token, tg_chat, img_url, msg[:1024])
+        else:
+            sent = send_telegram(tg_token, tg_chat, msg)
+
+        print(f"    -> {'CONFLUENCIA enviada' if sent else 'ERROR Telegram'} ({len(unique_sigs)} traders){' +img' if img_url else ''}")
         if sent:
             confluenced_keys.add(ckey)
             alerts += 1
 
-            # Ejecutar orden en broker si está configurado
+            # Horizonte mayoritario para sizing
+            horizontes = [s.get("HORIZONTE", "DIA").upper() for s in unique_sigs]
+            horizonte  = max(set(horizontes), key=horizontes.count)
+
+            # Ejecutar orden en broker
             from broker import execute_signal
             broker_status = execute_signal(
                 instrument = ev.get("INSTRUMENTO", instrument),
@@ -507,6 +561,7 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                 tp         = ev.get("TP",         "N/A"),
                 sl         = ev.get("SL",         "N/A"),
                 calidad    = ev.get("CALIDAD",    "MEDIA"),
+                horizonte  = horizonte,
             )
             print(f"    -> BROKER: {broker_status}")
             send_telegram(tg_token, tg_chat,

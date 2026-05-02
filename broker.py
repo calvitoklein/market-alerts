@@ -1,25 +1,41 @@
 """
 Broker connector para señales de confluencia.
 - Soporta cualquier exchange compatible con ccxt (BitGet, Binance, Bybit, OKX...)
-- TRADE_ENABLED=false por defecto — solo loguea. Pon true en .env para operar en vivo.
-- Solo ejecuta BTC y ETH (futuros USDT-M). NQ/ES se ignoran.
+- TRADE_ENABLED=false por defecto. Pon true en .env para operar en vivo.
+- Solo ejecuta BTC y ETH (futuros USDT-M). NQ/ES/XAU se ignoran.
 - Solo ejecuta señales con CALIDAD: ALTA.
+- Sizing y apalancamiento ajustados automáticamente por horizonte temporal.
 """
 
 import os
 import re
 
-# ── Config desde .env ─────────────────────────────────────────────────────────
+# ── Config base ───────────────────────────────────────────────────────────────
 
-EXCHANGE_ID    = os.environ.get("EXCHANGE_ID", "bitget").lower()
-API_KEY        = os.environ.get("EXCHANGE_API_KEY", "")
-API_SECRET     = os.environ.get("EXCHANGE_API_SECRET", "")
-API_PASS       = os.environ.get("EXCHANGE_PASSPHRASE", "")   # BitGet / OKX lo requieren
-TRADE_ENABLED  = os.environ.get("TRADE_ENABLED", "false").lower() == "true"
-MAX_USDT       = float(os.environ.get("MAX_TRADE_USDT", "20"))
-LEVERAGE       = int(os.environ.get("TRADE_LEVERAGE", "1"))
+EXCHANGE_ID   = os.environ.get("EXCHANGE_ID",   "bitget").lower()
+API_KEY       = os.environ.get("EXCHANGE_API_KEY",    "")
+API_SECRET    = os.environ.get("EXCHANGE_API_SECRET",  "")
+API_PASS      = os.environ.get("EXCHANGE_PASSPHRASE",  "")
+TRADE_ENABLED = os.environ.get("TRADE_ENABLED", "false").lower() == "true"
 
-# Mapeo instrumento → symbol ccxt (futuros perpetuos USDT-M)
+# ── Sizing por horizonte temporal ─────────────────────────────────────────────
+#
+#  SCALP   — minutos/horas     → poco dinero, apalancamiento alto (riesgo acotado)
+#  DIA     — hasta 24h         → tamaño medio, apalancamiento medio
+#  SWING   — días/semanas      → más dinero, apalancamiento bajo
+#  POSICION — semanas/meses    → más dinero, sin apalancamiento
+#
+HORIZON_CFG = {
+    "SCALP":    {"usdt": float(os.environ.get("SIZE_SCALP",    "10")),
+                 "lev":  int(  os.environ.get("LEV_SCALP",     "5"))},
+    "DIA":      {"usdt": float(os.environ.get("SIZE_DIA",      "20")),
+                 "lev":  int(  os.environ.get("LEV_DIA",       "3"))},
+    "SWING":    {"usdt": float(os.environ.get("SIZE_SWING",    "50")),
+                 "lev":  int(  os.environ.get("LEV_SWING",     "2"))},
+    "POSICION": {"usdt": float(os.environ.get("SIZE_POSICION", "100")),
+                 "lev":  int(  os.environ.get("LEV_POSICION",  "1"))},
+}
+
 SYMBOL_MAP = {
     "BTC": "BTC/USDT:USDT",
     "ETH": "ETH/USDT:USDT",
@@ -32,31 +48,23 @@ def _get_exchange():
         return None
     try:
         import ccxt
-        exchange_class = getattr(ccxt, EXCHANGE_ID)
-        ex = exchange_class({
+        ex = getattr(ccxt, EXCHANGE_ID)({
             "apiKey":   API_KEY,
             "secret":   API_SECRET,
             "password": API_PASS,
-            "options":  {"defaultType": "swap"},   # futuros perpetuos
+            "options":  {"defaultType": "swap"},
         })
         return ex
-    except Exception as e:
+    except Exception:
         return None
 
 # ── Parseo de precio ──────────────────────────────────────────────────────────
 
 def parse_price(s: str):
-    """
-    Convierte string de precio a float.
-    Acepta: '67000', '$67k', '66000-67000' (devuelve el punto medio), 'MERCADO'.
-    Devuelve None si no puede parsear.
-    """
     if not s:
         return None
     s = s.strip().replace(",", "").replace("$", "").replace(" ", "")
-    # "k" → miles
-    s = re.sub(r'(\d+(?:\.\d+)?)k', lambda m: str(float(m.group(1)) * 1000), s, flags=re.I)
-    # rango "A-B" → punto medio
+    s = re.sub(r"(\d+(?:\.\d+)?)k", lambda m: str(float(m.group(1)) * 1000), s, flags=re.I)
     if re.match(r"^\d+(\.\d+)?-\d+(\.\d+)?$", s):
         parts = s.split("-")
         try:
@@ -71,50 +79,48 @@ def parse_price(s: str):
 # ── Ejecución de señal ────────────────────────────────────────────────────────
 
 def execute_signal(instrument: str, direction: str,
-                   entrada: str, tp: str, sl: str, calidad: str) -> str:
-    """
-    Ejecuta (o simula) una orden a partir de una señal de confluencia.
-    Devuelve string de estado para loguear y mandar a Telegram.
-    """
+                   entrada: str, tp: str, sl: str,
+                   calidad: str, horizonte: str = "DIA") -> str:
 
     symbol = SYMBOL_MAP.get(instrument.upper())
     if not symbol:
-        return f"skip — {instrument} no es crypto soportado (solo BTC/ETH)"
+        return f"skip — {instrument} no soportado en broker (solo BTC/ETH)"
 
-    if calidad.upper() not in ("ALTA",):
+    if calidad.upper() != "ALTA":
         return f"skip — calidad {calidad} insuficiente (requiere ALTA)"
 
-    side       = "buy"  if direction.upper() == "LARGO" else "sell"
-    entry_p    = parse_price(entrada) if entrada.upper() not in ("MERCADO", "N/A", "") else None
-    tp_p       = parse_price(tp)  if tp  and tp.upper()  != "N/A" else None
-    sl_p       = parse_price(sl)  if sl  and sl.upper()  != "N/A" else None
-    is_market  = entrada.upper() == "MERCADO" or entry_p is None
+    cfg       = HORIZON_CFG.get(horizonte.upper(), HORIZON_CFG["DIA"])
+    max_usdt  = cfg["usdt"]
+    leverage  = cfg["lev"]
 
-    # ── Paper mode ──────────────────────────────────────────────────────────
+    side      = "buy"  if direction.upper() == "LARGO" else "sell"
+    entry_p   = parse_price(entrada) if entrada.upper() not in ("MERCADO","N/A","") else None
+    tp_p      = parse_price(tp)  if tp  and tp.upper()  != "N/A" else None
+    sl_p      = parse_price(sl)  if sl  and sl.upper()  != "N/A" else None
+    is_market = entrada.upper() == "MERCADO" or entry_p is None
+
+    # ── Paper mode ─────────────────────────────────────────────────────────
     if not TRADE_ENABLED:
-        price_str = f"@ {entry_p}" if entry_p else "@ MERCADO"
-        tp_str    = f"TP {tp_p}"   if tp_p    else "TP N/A"
-        sl_str    = f"SL {sl_p}"   if sl_p    else "SL N/A"
-        return f"[PAPER] {side.upper()} {symbol} {price_str} | {tp_str} | {sl_str} | ${MAX_USDT} max"
+        p_str = f"@ {entry_p}" if entry_p else "@ MERCADO"
+        return (f"[PAPER] {horizonte} | {side.upper()} {symbol} {p_str} "
+                f"| TP {tp_p or 'N/A'} | SL {sl_p or 'N/A'} "
+                f"| ${max_usdt} x{leverage}lev")
 
     # ── Live mode ───────────────────────────────────────────────────────────
     ex = _get_exchange()
     if not ex:
-        return "ERROR — exchange no configurado. Revisa EXCHANGE_API_KEY en .env"
+        return "ERROR — exchange no configurado (revisa EXCHANGE_API_KEY en .env)"
 
     try:
-        # Precio actual para calcular cantidad
-        ticker     = ex.fetch_ticker(symbol)
-        use_price  = entry_p if entry_p else ticker["last"]
-        qty        = round(MAX_USDT / use_price, 6)
+        ticker    = ex.fetch_ticker(symbol)
+        use_price = entry_p if entry_p else ticker["last"]
+        qty       = round(max_usdt * leverage / use_price, 6)
 
-        # Apalancamiento
         try:
-            ex.set_leverage(LEVERAGE, symbol)
+            ex.set_leverage(leverage, symbol)
         except Exception:
             pass
 
-        # Orden principal
         if is_market:
             order = ex.create_market_order(symbol, side, qty)
         else:
@@ -122,7 +128,6 @@ def execute_signal(instrument: str, direction: str,
 
         order_id = order.get("id", "?")
 
-        # Take profit
         if tp_p:
             tp_side = "sell" if side == "buy" else "buy"
             try:
@@ -131,7 +136,6 @@ def execute_signal(instrument: str, direction: str,
             except Exception:
                 pass
 
-        # Stop loss
         if sl_p:
             sl_side = "sell" if side == "buy" else "buy"
             try:
@@ -140,9 +144,10 @@ def execute_signal(instrument: str, direction: str,
             except Exception:
                 pass
 
-        return (f"ORDEN ENVIADA — {side.upper()} {qty} {symbol} "
-                f"{'@ MERCADO' if is_market else f'@ {entry_p}'} | "
-                f"TP {tp_p or 'N/A'} | SL {sl_p or 'N/A'} | id {order_id}")
+        price_str = "MERCADO" if is_market else str(entry_p)
+        return (f"ORDEN — {horizonte} | {side.upper()} {qty} {symbol} @ {price_str} "
+                f"| TP {tp_p or 'N/A'} | SL {sl_p or 'N/A'} "
+                f"| ${max_usdt} x{leverage}lev | id {order_id}")
 
     except Exception as e:
         return f"ERROR broker — {e}"
