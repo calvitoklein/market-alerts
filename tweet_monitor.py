@@ -48,6 +48,25 @@ MARKET_KEYWORDS = {
     "chip","semiconductor","nvidia","openai","tarifa","arancel","economia",
 }
 
+# Cuentas políticas/influencers: skip en el ciclo de noticias por ahora
+POLITICAL_SKIP_CATEGORIES = {"politica"}
+
+# Palabras puramente políticas: si aparecen SIN keywords financieras fuertes → skip
+POLITICAL_BLOCK_KEYWORDS = {
+    "trump", "white house", "executive order", "cuba", "uss lincoln",
+    "iran sanctions", "russia sanctions", "ukraine", "deportation",
+    "immigration", "border wall", "democrat", "republican", "senate vote",
+    "congress", "house passed", "senate passed", "bill signed", "nato",
+    "election", "campaña", "presidente firmó", "decreto ejecutivo",
+}
+
+FINANCIAL_STRONG_KEYWORDS = {
+    "fed", "fomc", "powell", "rate", "inflation", "gdp", "recession",
+    "earnings", "profit", "revenue", "ipo", "yield", "nasdaq", "s&p",
+    "sp500", "bitcoin", "btc", "crypto", "oil", "gold", "dollar",
+    "interest rate", "treasury", "futures", "market", "stocks",
+}
+
 # Pre-filtro: señales de trading
 SIGNAL_KEYWORDS = {
     "long", "short", "buy", "sell", "entry", "entrada", "target", "tp", "sl",
@@ -381,6 +400,10 @@ def run_news_cycle(accounts, client, tg_token, tg_chat, seen) -> int:
     alerts = 0
     fetched = fetch_all_parallel(accounts)
     for handle, (acc, tweets) in fetched.items():
+        # Skip political/influencer accounts for now
+        if acc.get("categoria") in POLITICAL_SKIP_CATEGORIES:
+            continue
+
         name = acc["name"]
         for tw in tweets:
             tid = tw.get("id") or tw.get("link", "")
@@ -397,6 +420,12 @@ def run_news_cycle(accounts, client, tg_token, tg_chat, seen) -> int:
             if not any(kw in text_lower for kw in MARKET_KEYWORDS):
                 print(f"  @{handle}: sin keywords — skip")
                 continue
+
+            # Block purely political tweets without real financial impact
+            if any(kw in text_lower for kw in POLITICAL_BLOCK_KEYWORDS):
+                if not any(kw in text_lower for kw in FINANCIAL_STRONG_KEYWORDS):
+                    print(f"  @{handle}: tweet político sin impacto financiero — skip")
+                    continue
 
             print(f"  @{handle}: {text[:65]}...")
             time.sleep(GROQ_CALL_DELAY)
@@ -456,12 +485,55 @@ def get_confluence_key(instrument: str, direction: str, signals: list) -> str:
     handles = "_".join(sorted(s["handle"] for s in signals))
     return f"{instrument}_{direction}_{handles}"
 
+def _fetch_signals_all(signal_accounts: list) -> dict:
+    """
+    Fetches signals from: twitter_api (if cookies) or Nitter RSS, plus web sources
+    (Telegram channels, TradingView, StockTwits). Returns {handle: (acc, tweets)}.
+    """
+    # Primary: twitter_api with browser cookies (local), or Nitter RSS (fallback)
+    try:
+        from twitter_api import is_configured, TwitterAPI
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        if is_configured():
+            api = TwitterAPI.from_file()
+            fetched = {}
+            def _fetch_one(acc):
+                try:
+                    return acc, api.user_tweets(acc["handle"], limit=5)
+                except Exception:
+                    return acc, []
+            with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+                futs = {ex.submit(_fetch_one, a): a for a in signal_accounts}
+                for f in _as_completed(futs):
+                    acc, tweets = f.result()
+                    fetched[acc["handle"]] = (acc, tweets)
+        else:
+            fetched = fetch_all_parallel(signal_accounts)
+    except Exception:
+        fetched = fetch_all_parallel(signal_accounts)
+
+    # Also pull Telegram + TradingView + StockTwits (works in GitHub Actions too)
+    try:
+        from signals_web import fetch_all_web
+        web_msgs = fetch_all_web(use_tv=True, use_st=False, use_tg=True, max_age_days=1)
+        for msg in web_msgs:
+            author = msg.get("_author", "web")
+            src    = msg.get("_source", "web")
+            if author not in fetched:
+                fetched[author] = ({"handle": author, "name": f"{src}:{author}"}, [])
+            fetched[author][1].append(msg)
+    except Exception as e:
+        print(f"  [web] Error en fuentes web: {e}")
+
+    return fetched
+
+
 def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                      seen, signals_buffer, confluenced_keys) -> int:
     alerts = 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    fetched = fetch_all_parallel(signal_accounts)
+    fetched = _fetch_signals_all(signal_accounts)
     for handle, (acc, tweets) in fetched.items():
         name = acc["name"]
         for tw in tweets:
@@ -595,13 +667,19 @@ def main():
         print("ERROR: faltan GROQ_API_KEY, TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
         sys.exit(1)
 
-    with open(ACCOUNTS_FILE) as f:
-        accounts = json.load(f)
+    try:
+        with open(ACCOUNTS_FILE) as f:
+            accounts = json.load(f)
+    except Exception:
+        accounts = []
 
     signal_accounts = []
     if os.path.exists(SIGNAL_ACCOUNTS_FILE):
-        with open(SIGNAL_ACCOUNTS_FILE) as f:
-            signal_accounts = json.load(f)
+        try:
+            with open(SIGNAL_ACCOUNTS_FILE) as f:
+                signal_accounts = json.load(f)
+        except Exception:
+            signal_accounts = []
 
     client          = Groq(api_key=groq_key)
     seen            = load_seen()

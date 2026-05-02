@@ -1,3 +1,11 @@
 .env
 __pycache__/
 *.pyc
+*.db
+twitter_cookies.json
+seen_tweets.json
+signals_buffer.json
+confluenced_keys.json
+pending_results.json
+last_leaderboard.txt
+trader_stats.json

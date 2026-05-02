@@ -123,8 +123,17 @@ def get_range_since(instrument: str, since: datetime):
                 return None
             import yfinance as yf
             t = yf.Ticker(yf_sym)
-            h = t.history(period="2d", interval="1h")
-            h = h[h.index >= since.replace(tzinfo=None)]
+            # Use 5d to cover signals up to 14 days old
+            age_days = max(3, int((datetime.now(timezone.utc) - since).total_seconds() / 86400) + 1)
+            h = t.history(period=f"{min(age_days, 14)}d", interval="1h")
+            if h.empty:
+                return None
+            # Normalize index to UTC for comparison
+            if h.index.tz is not None:
+                idx = h.index.tz_convert("UTC")
+            else:
+                idx = h.index.tz_localize("UTC")
+            h = h[idx >= since]
             if h.empty:
                 return None
             return float(h["High"].max()), float(h["Low"].min()), float(h["Close"].iloc[-1])

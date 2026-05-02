@@ -23,6 +23,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Write Twitter cookies (optional)
+        if: ${{ secrets.TWITTER_AUTH_TOKEN != '' }}
+        run: |
+          echo '{"auth_token":"${{ secrets.TWITTER_AUTH_TOKEN }}","ct0":"${{ secrets.TWITTER_CT0 }}"}' > twitter_cookies.json
+
       - name: Run monitor
         env:
           GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}

@@ -1,6 +1,11 @@
 """
-Backtesting de señales recientes (ultimas 1-2 semanas via Nitter RSS).
-- Obtiene hasta 20 tweets por trader (RSS limit)
+Backtesting de señales recientes (ultimas 1-2 semanas).
+Fuentes de datos (en orden de preferencia):
+  1. twscrape  — scraping real de Twitter/X via cookies del navegador
+                 Configurar primero con: python setup_cookies.py
+  2. Nitter RSS — fallback si twscrape no esta disponible
+
+- Obtiene hasta 20 tweets por trader
 - Extrae señales con Groq (mismo prompt que el monitor live)
 - Evalua WIN/LOSS con precios historicos (yfinance/ccxt)
 - Acumula resultados en trader_stats.json
@@ -9,6 +14,8 @@ Uso:
     python backtest.py                  # todos los traders
     python backtest.py --limit 20       # solo primeros 20 traders
     python backtest.py --delay 1.5      # delay entre llamadas Groq
+    python backtest.py --source rss     # forzar RSS aunque twscrape este disponible
+    python backtest.py --source twscrape
 """
 
 import os, sys, json, time, argparse
@@ -39,6 +46,8 @@ GROQ_MODEL  = "llama-3.1-8b-instant"
 MIN_AGE_H   = 6     # señal debe tener >6h para evaluar resultado
 MAX_AGE_D   = 14    # ignorar tweets de hace >14 días
 FETCH_W     = 20    # hilos paralelos para RSS
+
+DB_PATH = os.path.join(DIR, "twscrape_accounts.db")
 
 NITTER_INSTANCES = [
     "nitter.net", "nitter.privacydev.net", "nitter.poast.org",
@@ -76,9 +85,9 @@ CONFIANZA_TRADER: BAJA o MEDIA o ALTA
 HORIZONTE: SCALP o DIA o SWING o POSICION
 RESUMEN: [max 8 palabras en espanol]"""
 
-# ── Fetch ─────────────────────────────────────────────────────────────────────
+# ── Fetch via Nitter RSS (fallback) ──────────────────────────────────────────
 
-def fetch_tweets_20(handle: str) -> list:
+def fetch_tweets_rss(handle: str) -> list:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; RSS)"}
     for inst in NITTER_INSTANCES:
         try:
@@ -90,10 +99,10 @@ def fetch_tweets_20(handle: str) -> list:
             continue
     return []
 
-def fetch_all(accounts: list) -> dict:
+def fetch_all_rss(accounts: list) -> dict:
     results = {}
     with ThreadPoolExecutor(max_workers=FETCH_W) as ex:
-        fut = {ex.submit(fetch_tweets_20, a["handle"]): a for a in accounts}
+        fut = {ex.submit(fetch_tweets_rss, a["handle"]): a for a in accounts}
         for f in as_completed(fut):
             acc = fut[f]
             try:
@@ -102,10 +111,48 @@ def fetch_all(accounts: list) -> dict:
                 results[acc["handle"]] = (acc, [])
     return results
 
+# ── Fetch via twitter_api (primary) ──────────────────────────────────────────
+
+def _twitter_api_available() -> bool:
+    from twitter_api import is_configured
+    return is_configured()
+
+def _fetch_one_twitter_api(handle: str, api) -> list:
+    try:
+        return api.user_tweets(handle, limit=20)
+    except Exception:
+        return []
+
+def fetch_all_twitter_api(accounts: list) -> dict:
+    from twitter_api import TwitterAPI
+    api = TwitterAPI.from_file()
+    results = {}
+    with ThreadPoolExecutor(max_workers=FETCH_W) as ex:
+        fut = {ex.submit(_fetch_one_twitter_api, a["handle"], api): a for a in accounts}
+        for f in as_completed(fut):
+            acc = fut[f]
+            try:
+                results[acc["handle"]] = (acc, f.result(timeout=20))
+            except Exception:
+                results[acc["handle"]] = (acc, [])
+    return results
+
+def fetch_all(accounts: list, source: str = "auto") -> dict:
+    if source == "rss":
+        print("  [src] Nitter RSS")
+        return fetch_all_rss(accounts)
+    if source == "twitter_api" or (source == "auto" and _twitter_api_available()):
+        print("  [src] Twitter GraphQL API (cookies del navegador)")
+        return fetch_all_twitter_api(accounts)
+    print("  [src] Nitter RSS (fallback)")
+    return fetch_all_rss(accounts)
+
 # ── Parse fecha tweet ─────────────────────────────────────────────────────────
 
 def parse_tweet_date(tw) -> datetime | None:
-    """Extrae datetime UTC de un entry de feedparser."""
+    # twscrape tweets already have _ts set
+    if "_ts" in tw:
+        return tw["_ts"]
     import email.utils
     for field in ("published", "updated"):
         val = tw.get(field)
@@ -170,9 +217,11 @@ def evaluate_historical(instrument: str, direction: str,
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit",  type=int, default=0,   help="Max traders a procesar (0=todos)")
-    parser.add_argument("--delay",  type=float, default=1.2, help="Delay entre llamadas Groq (s)")
+    parser.add_argument("--limit",  type=int,   default=0,    help="Max traders a procesar (0=todos)")
+    parser.add_argument("--delay",  type=float, default=1.2,  help="Delay entre llamadas Groq (s)")
+    parser.add_argument("--source", default="auto",           help="Fuente: auto | twscrape | rss")
     args = parser.parse_args()
 
     groq_key = os.environ.get("GROQ_API_KEY")
@@ -196,8 +245,34 @@ def main():
     print(f"\n=== BACKTEST — {len(accounts)} traders | {MAX_AGE_D}d ventana ===\n")
     print(f"[1/3] Fetching tweets en paralelo ({FETCH_W} workers)...")
     t0      = time.time()
-    fetched = fetch_all(accounts)
-    print(f"      {sum(len(tw) for _, tw in fetched.values())} tweets en {time.time()-t0:.1f}s\n")
+    fetched = fetch_all(accounts, source=args.source)
+    total_f = sum(len(tw) for _, tw in fetched.values())
+    print(f"      {total_f} tweets en {time.time()-t0:.1f}s\n")
+    if total_f == 0:
+        print("[!] No se obtuvieron tweets.")
+        print("    Si no tienes twscrape configurado, ejecuta primero:")
+        print("        python setup_cookies.py")
+        print("    (requiere cookies de tu navegador con sesion en Twitter/X)")
+        sys.exit(0)
+
+    # ── Fuentes web (TradingView, StockTwits, Telegram) ─────────────────────
+    if args.source != "rss":
+        print("[1b/3] Fetching fuentes web (TV/StockTwits/Telegram)...")
+        try:
+            from signals_web import fetch_all_web
+            web_msgs = fetch_all_web(max_age_days=MAX_AGE_D)
+            # Convert to same handle→(acc,tweets) format
+            for msg in web_msgs:
+                author  = msg.get("_author", "web_source")
+                src     = msg.get("_source", "web")
+                pseudo_acc = {"handle": author, "name": f"{src}:{author}"}
+                if author not in fetched:
+                    fetched[author] = (pseudo_acc, [])
+                fetched[author][1].append(msg)
+            total_web = sum(len(v[1]) for k, v in fetched.items() if k not in {a["handle"] for a in accounts})
+            print(f"      {total_web} mensajes web\n")
+        except Exception as e:
+            print(f"      [!] Error en fuentes web: {e}\n")
 
     print("[2/3] Filtrando y extrayendo señales con Groq...")
     stats        = load_stats()
@@ -238,7 +313,8 @@ def main():
                 continue
 
             entrada = sig.get("ENTRADA", "N/A").strip()
-            if entrada.upper() in ("N/A", "", "?", "NONE"):
+            entrada_up = entrada.upper()
+            if not entrada_up or entrada_up.startswith("N/A") or entrada_up in ("?", "NONE", "NO"):
                 continue
 
             total_sigs += 1
@@ -257,11 +333,13 @@ def main():
             else:                  neutrals += 1
 
             age_h = (now - ts).total_seconds() / 3600
-            print(f"  @{handle} | {instrument} {direction} @ {entrada} "
-                  f"| {age_h:.0f}h ago | {result}")
+            src_tag = f"[{tw.get('_source','tw')}]"
+            line = (f"  {src_tag} @{handle} | {instrument} {direction} @ {entrada} "
+                    f"| {age_h:.0f}h ago | {result}")
+            print(line.encode("ascii", "replace").decode())
 
         if account_sigs:
-            print(f"  ── @{handle}: {account_sigs} señal(es) encontrada(s)")
+            print(f"  -- @{handle}: {account_sigs} senal(es)")
 
     save_stats(stats)
 
@@ -269,7 +347,7 @@ def main():
     print(f"\n{'='*50}")
     print(f"  Tweets revisados   : {total_tweets}")
     print(f"  Pasaron keywords   : {total_kw}")
-    print(f"  Señales extraídas  : {total_sigs}")
+    print(f"  Senales extraidas  : {total_sigs}")
     print(f"  Evaluadas          : {total_eval}")
     print(f"  WIN / LOSS / NEUTRAL: {wins} / {losses} / {neutrals}")
     if total_eval:
