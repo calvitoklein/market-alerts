@@ -249,32 +249,38 @@ def analyze_tweet(text: str, name: str, handle: str, client: Groq) -> dict | Non
 
 # ── Extraccion de señales de trading ─────────────────────────────────────────
 
-SIGNAL_EXTRACT_PROMPT = """Analiza este tweet del trader {name} (@{handle}).
+SIGNAL_EXTRACT_PROMPT = """Analiza este mensaje del trader {name} (@{handle}).
 
-Tweet: "{text}"
+Mensaje: "{text}"
 
-Responde SENAL: NO si el tweet es cualquiera de estos casos:
+Responde SENAL: NO si es cualquiera de estos casos:
 - Comentario general, opinion, analisis sin accion concreta
 - Precio historico o prediccion a largo plazo (meses/años)
-- Referencia a operacion ya cerrada
+- Referencia a operacion ya cerrada ("TP hit", "closed", "resultado")
 - Noticia de mercado sin señal de entrada
 - No dice explicitamente long/short/buy/sell/largo/corto/compra/venta
 
-Responde SENAL: SI SOLO si el trader esta dando una señal ACTIVA Y ACCIONABLE AHORA con direccion clara.
+Responde SENAL: SI si el trader da una señal ACTIVA y ACCIONABLE AHORA.
+
+Notaciones de precio que DEBES reconocer:
+- "@4727" o "@ 4727" o "at 4727" = ENTRADA 4727
+- "entry: 4727" o "Entry 4727" o "E: 4727" = ENTRADA 4727
+- "buy 4710-4706" o "sell 4722-4727" = ENTRADA rango
+- "SL: 4739" o "sl 4739" o "Stop 4739" o "stop loss 4739" = SL
+- "TP: 4720" o "tp1: 4720" o "target 4720" = TP (usa el primer objetivo)
 
 Formato si es SI:
 SENAL: SI
-INSTRUMENTO: NQ o ES o BTC o ETH o XAU o GC o CL o DXY o otro
+INSTRUMENTO: XAU o BTC o ETH o NQ o ES o SOL o BNB o XRP o GOLD o SILVER o otro
 DIRECCION: LARGO o CORTO
-ENTRADA: [precio numerico o rango, ej: 19500 o 19500-19550. Si no hay precio: N/A]
-TP: [precio numerico objetivo, o N/A]
-SL: [precio numerico stop loss, o N/A]
+ENTRADA: [precio numerico o rango como 4710-4706. Si genuinamente no hay precio: N/A]
+TP: [precio objetivo o N/A]
+SL: [stop loss o N/A]
 CONFIANZA_TRADER: BAJA o MEDIA o ALTA
 HORIZONTE: SCALP (minutos-horas) o DIA (hasta 24h) o SWING (dias-semanas) o POSICION (semanas-meses)
 RESUMEN: [max 8 palabras en espanol]
 
-Guia HORIZONTE: scalp/quick/immediate=SCALP, intraday/today/hoy=DIA, swing/weekly/dias=SWING, position/hold/months=POSICION
-Si no hay precio de entrada especifico, es muy probable que NO sea una señal valida."""
+Guia HORIZONTE: scalp/quick/immediate/now=SCALP, intraday/today/hoy=DIA, swing/weekly/dias=SWING, position/hold/months=POSICION"""
 
 def extract_signal(text: str, name: str, handle: str, client: Groq) -> dict | None:
     try:
@@ -816,6 +822,17 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             # Descartar señales sin precio concreto (debe contener al menos un dígito)
             if not re.search(r'\d', entrada):
                 print(f"    -> señal sin precio de entrada — skip")
+                continue
+
+            # Descartar instrumentos no soportados en BitGet (ej: Forex spot EUR/USD)
+            _instr_up = sig.get("INSTRUMENTO", "").upper()
+            try:
+                from broker import SYMBOL_MAP as _SM
+                _supported = _instr_up in _SM
+            except Exception:
+                _supported = True   # si no se puede importar, dejar pasar
+            if not _supported:
+                print(f"    -> {_instr_up} no está en BitGet — skip")
                 continue
 
             # Descartar señales con precio obsoleto (el mercado se movió demasiado)
