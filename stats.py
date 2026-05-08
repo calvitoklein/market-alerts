@@ -21,46 +21,58 @@ MAX_PENDING       = 500
 
 # yfinance symbols para instrumentos no-crypto
 YFINANCE_MAP = {
-    "XAU": "GC=F",   "GOLD": "GC=F", "GC": "GC=F",
+    # Metales
+    "XAU": "GC=F", "GOLD": "GC=F", "GC": "GC=F",
+    "XAG": "SI=F", "SILVER": "SI=F",
+    "COPPER": "HG=F",
+    "NATGAS": "NG=F",
+    "XPT": "PL=F",   # Platinum
+    "XPD": "PA=F",   # Palladium
+    # Índices
     "NQ":  "NQ=F",
     "ES":  "ES=F",
-    "CL":  "CL=F",   # petróleo
+    "CL":  "CL=F",
     "DXY": "DX-Y.NYB",
+    # Acciones (evaluación de señales)
+    "NVDA": "NVDA", "TSLA": "TSLA", "AAPL": "AAPL",
+    "META": "META", "GOOGL": "GOOGL", "MSFT": "MSFT",
+    "AMD": "AMD", "COIN": "COIN", "MSTR": "MSTR",
+    "AMZN": "AMZN", "NFLX": "NFLX", "PLTR": "PLTR",
 }
 
 # ── Persistencia ──────────────────────────────────────────────────────────────
 
 def load_pending() -> list:
     try:
-        with open(PENDING_FILE) as f:
+        with open(PENDING_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return []
 
 def save_pending(pending: list):
-    with open(PENDING_FILE, "w") as f:
+    with open(PENDING_FILE, "w", encoding="utf-8") as f:
         json.dump(pending[-MAX_PENDING:], f, ensure_ascii=False)
 
 def load_stats() -> dict:
     try:
-        with open(STATS_FILE) as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 def save_stats(stats: dict):
-    with open(STATS_FILE, "w") as f:
+    with open(STATS_FILE, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
 def _last_leaderboard_ts() -> datetime:
     try:
-        with open(LAST_LB_FILE) as f:
+        with open(LAST_LB_FILE, encoding="utf-8") as f:
             return datetime.fromisoformat(f.read().strip())
     except Exception:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 def _save_leaderboard_ts():
-    with open(LAST_LB_FILE, "w") as f:
+    with open(LAST_LB_FILE, "w", encoding="utf-8") as f:
         f.write(datetime.now(timezone.utc).isoformat())
 
 # ── Precio actual ─────────────────────────────────────────────────────────────

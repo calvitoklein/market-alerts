@@ -10,3 +10,9 @@ confluenced_keys.json
 pending_results.json
 last_leaderboard.txt
 trader_stats.json
+last_heartbeat.txt
+bot_output.log
+bot_error.log
+dashboard_output.log
+positions_log.csv
+bot_events.json

@@ -1,17 +1,25 @@
 @echo off
-title Market Alert Monitor - NQ / SP500 / BTC
+title Signal Monitor - Lanzador
 color 0A
 cd /d %~dp0
-
-for /f "tokens=1,2 delims==" %%a in (.env) do set %%a=%%b
 set PYTHONIOENCODING=utf-8
 
 echo ==========================================
-echo   MARKET ALERT MONITOR  (NQ / SP500 / BTC)
-echo   Revisa cada 2 min - Cierra para parar
+echo   SIGNAL MONITOR BOT  v2
+echo   XAU / BTC / ETH / SOL + Insiders
 echo ==========================================
 echo.
 
-python tweet_monitor.py --loop
+echo Arrancando bot principal...
+start "BOT - tweet_monitor" cmd /k "set PYTHONIOENCODING=utf-8 && python -u tweet_monitor.py --loop"
 
+echo Arrancando dashboard (localhost:5000)...
+start "DASHBOARD - flask" cmd /k "set PYTHONIOENCODING=utf-8 && python dashboard.py"
+
+timeout /t 3 /nobreak >nul
+echo Abriendo dashboard en el navegador...
+start http://localhost:5000
+
+echo.
+echo Todo lanzado. Cierra las ventanas del bot y dashboard para parar.
 pause

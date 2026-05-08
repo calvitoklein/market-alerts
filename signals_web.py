@@ -39,6 +39,7 @@ TV_SYMBOLS = {
     "NQ":   "CME_MINI:NQ1!",
     "ES":   "CME_MINI:ES1!",
     "XAU":  "COMEX:GC1!",
+    "XAG":  "COMEX:SI1!",
     "DXY":  "TVC:DXY",
     "OIL":  "NYMEX:CL1!",
 }
@@ -55,26 +56,155 @@ ST_SYMBOLS = {
     "NVDA": "NVDA",
 }
 
-# Canales públicos de Telegram verificados — todos muestran ENTRY/SL/TP + resultados reales
+# Canales públicos de Telegram por categoria de par en BitGet
 TELEGRAM_CHANNELS = {
-    # ── Gold / XAU ───────────────────────────────────────────────────────────
-    "FX Leaders XAU":       "FXLeaders",            # SELL@4563 SL:4573 TP:4523 +380 PIPS
-    "Metatrader Signals":   "metatrader_signals",   # Gold @4599 SL:4612 Tp-4594
-    "Biaheza Signals":      "biaheza_signals",       # Gold Buy@4560 SL:4550 Tp-4565/4569
-    "ICT Traders":          "ict_traders",           # XAUUSD SELL@4558 TP 4528 SL 4573
-    "XAUUSD Signals":       "xauusd_signals",        # XAU/DXY/EURUSD ENTER/SL/TP
 
-    # ── Gold + Forex multiactivo ──────────────────────────────────────────────
-    "Gold Forex VIP":       "gold_forex_signals_vip", # XAU/DXY/ETH ENTER+SL+TP, activo diario
-    "United Signals FX":    "UnitedSignalsFX",        # EURUSD/USDJPY Entry+SL+TP, +PIPS cerrados
-    "Anabel Signals":       "anabelsignals",           # Gold/Silver/BTC SL+TP, activo diario
+    # ══════════════════════════════════════════════════════════════════════════
+    # METALES — XAU (Gold) · XAG (Silver) · COPPER · NATGAS · PAXG · XPT · XPD
+    # ══════════════════════════════════════════════════════════════════════════
+    "FX Leaders XAU":        "FXLeaders",
+    "Metatrader Signals":    "metatrader_signals",
+    "Biaheza Signals":       "biaheza_signals",
+    "ICT Traders":           "ict_traders",
+    "XAUUSD Signals":        "xauusd_signals",
+    "Gold Forex VIP":        "gold_forex_signals_vip",
+    "Gold Signal Channel":   "goldsignalchannel",
+    "XAU Free Signals":      "xauusd_free_signals",
+    "Gold Trade Signals":    "goldtradesignals",
+    "Smart Money Gold":      "smartmoneygoldsignals",
+    "ICT Gold":              "ict_gold_signals",
+    "FX Gold Trade":         "fxgoldtrade",
+    "XAU Analysis":          "xauusd_analysis",
+    "Gold Pips":             "goldpipssignals",
+    "XAU VIP":               "xauvipsignals",
+    "Gold SMC Signals":      "goldsmc_signals",
+    "XAU Daily Setup":       "xaudailysetup",
+    "Silver Signals":        "silvertradesignals",
+    "XAG Traders":           "xagtraders",
+    "Metals Trading":        "metalstrading",
+    "Commodities Signals":   "commoditiessignals",
 
-    # ── Indices (NQ/ES/DAX) ──────────────────────────────────────────────────
-    "Quant Signals":        "quant_signals",         # US_TECH100 BUY@27376 + TRADE CLOSED
-    "ES Signals":           "es_signals",            # ES 1m stop levels
+    # ══════════════════════════════════════════════════════════════════════════
+    # L1 CRYPTO — BTC · ETH · SOL · BNB · XRP · ADA · AVAX · TON · TRX · DOT
+    # ══════════════════════════════════════════════════════════════════════════
+    "BTC Signals":           "btcsignalschannel",
+    "Crypto Signals":        "Cryptosignals",
+    "Binance Killers":       "BinanceKillers",
+    "Crypto Futures":        "cryptofuturessignals",
+    "ETH Signals":           "eth_signals_free",
+    "Crypto VIP":            "cryptovipsignals",
+    "BTC ETH Alerts":        "btcethalerts",
+    "BTC Scalp Signals":     "btcscalpsignals",
+    "BTC Whale Signals":     "btcwhalesignals",
+    "ETH BTC Scalp":         "ethbtcscalp",
+    "Crypto Entry Signals":  "cryptoentrysignals",
+    "Bitcoin Trading":       "bitcoin_trading_signals",
+    "ETH Whales":            "eth_whale_signals",
+    "SOL Signals":           "solana_signals_free",
+    "Solana Trading":        "solanatrading",
+    "SOL Daily Entries":     "soldailyentries",
+    "BNB Signals":           "bnbsignalsfree",
+    "XRP Signals":           "xrpsignalsfree",
+    "XRP Trading":           "xrptradingsignals",
+    "ADA Signals":           "adasignalsfree",
+    "AVAX Signals":          "avaxsignals",
+    "TON Signals":           "tonsignalsfree",
+    "TRX Trading":           "trxtradingsignals",
 
-    # ── Para añadir: busca canales en t.me/s/CANAL y pega el slug aqui ──────
-    # "Nombre":             "slug_canal",
+    # ══════════════════════════════════════════════════════════════════════════
+    # L2 / INFRAESTRUCTURA — ARB · OP · SUI · SEI · INJ · NEAR · APT · TIA · ZK
+    # ══════════════════════════════════════════════════════════════════════════
+    "ARB Signals":           "arbitrumsignals",
+    "OP Signals":            "optimismsignals",
+    "SUI Trading":           "suitradingsignals",
+    "INJ Signals":           "injectivesignals",
+    "Layer2 Signals":        "layer2tradingsignals",
+    "SEI Signals":           "seisignalsfree",
+    "NEAR Signals":          "nearsignals",
+    "APT Signals":           "aptossignals",
+    "L2 Scalp":              "l2scalptrading",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # DEFI — AAVE · UNI · LINK · CRV · GMX · JUP · PENDLE · DYDX · RUNE
+    # ══════════════════════════════════════════════════════════════════════════
+    "DeFi Signals":          "defisignalsfree",
+    "LINK Signals":          "chainlinksignals",
+    "AAVE Trading":          "aavetrading",
+    "DeFi Scalp":            "defiscalptrading",
+    "GMX Signals":           "gmxtradingsignals",
+    "Altcoin Signals":       "altcoinsignals_free",
+    "Altcoin Daily Sig":     "altcoindailysignals",
+    "Altcoin Entries":       "altcoinentriessignals",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # AI TOKENS — TAO · FET · RENDER · WLD · VIRTUAL · GRT · IO · CGPT
+    # ══════════════════════════════════════════════════════════════════════════
+    "AI Crypto Signals":     "aicryptosignals",
+    "TAO Signals":           "bittensor_signals",
+    "AI Token Trading":      "aitokentrade",
+    "WLD Signals":           "worldcoinsignals",
+    "RENDER Trading":        "rendertokensignals",
+    "AI Altcoins":           "aialtcoinsignals",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MEMECOINS — DOGE · SHIB · PEPE · WIF · BONK · FLOKI · BRETT · PNUT
+    # ══════════════════════════════════════════════════════════════════════════
+    "Meme Signals":          "memecoin_signals",
+    "PEPE Signals":          "pepesignalsfree",
+    "DOGE Signals":          "dogesignalsfree",
+    "WIF Signals":           "wifsignals",
+    "Meme Scalp":            "memescalptrading",
+    "Degen Signals":         "degensignalsfree",
+    "Meme Pumps":            "memepumptrading",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SOL ECOSYSTEM — JUP · RAY · DRIFT · PYTH · ORCA · KMNO
+    # ══════════════════════════════════════════════════════════════════════════
+    "Solana Ecosystem":      "solecosystemtrading",
+    "JUP Signals":           "jupitersignals",
+    "Raydium Signals":       "raydiumtrading",
+    "Sol DeFi Signals":      "soldefi_signals",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ACCIONES PERPETUAS BitGet — NVDA · TSLA · AAPL · META · GOOGL · MSFT
+    #   AMD · COIN · MSTR · PLTR · AMZN · NFLX · QQQ · SPY · TQQQ
+    # ══════════════════════════════════════════════════════════════════════════
+    "Stock Perps Signals":   "stockperpetuals",
+    "Crypto Stocks Trading": "cryptostockstrading",
+    "NVDA Trading":          "nvdasignalsfree",
+    "TSLA Signals":          "tslasignalsfree",
+    "Tech Stocks Signals":   "techstockssignals",
+    "Mag7 Trading":          "mag7tradingsignals",
+    "Stock Scalp Crypto":    "stockscalpcrypto",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # GENERAL ALTCOINS (covers 400+ otros pares en BitGet)
+    # ══════════════════════════════════════════════════════════════════════════
+    "Crypto Quant":          "CryptoQuantSignals",
+    "Crypto Premium Sig":    "cryptopremiumsignalsfree",
+    "Quant Signals":         "quant_signals",
+    "United Signals FX":     "UnitedSignalsFX",
+    "Signal Factory":        "SignalFactory",
+    "100x Gems":             "hundredxgems",
+    "Altcoin Gems":          "altcoingemssignals",
+    "Low Cap Gems":          "lowcapgemsfree",
+    "Binance Altcoins":      "binancealtcoinsignals",
+    "Crypto Pump Signals":   "cryptopumpsignalsfree",
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # INDICES NQ / ES (alertas contextuales — no ejecutan en BitGet)
+    # ══════════════════════════════════════════════════════════════════════════
+    "ES Signals":            "es_signals",
+    "Nasdaq Traders":        "NasdaqTraders",
+    "NQ Scalp":              "nqscalp",
+
+    # ── Indices NQ / ES ──────────────────────────────────────────────────────
+    "Quant Signals":        "quant_signals",
+    "ES Signals":           "es_signals",
+    "Nasdaq Traders":       "NasdaqTraders",
+    "Futures Traders":      "futurestraders",
+    "Day Trade Signals":    "daytradesignals",
+    "NQ Scalp":             "nqscalp",
 }
 
 HEADERS = {

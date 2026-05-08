@@ -1,0 +1,522 @@
+
+==============================================================
+  MANUAL DEL BOT — Twitter/X Signal Confluence Monitor
+  Proyecto: pasafondeadas/twitter_monitor
+  Última actualización: Mayo 2026
+==============================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ¿QUÉ HACE ESTE BOT?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+El bot monitoriza 4 fuentes de señales en tiempo real y ejecuta
+operaciones en BitGet cuando detecta suficiente confluencia:
+
+  1. CANALES DE TELEGRAM (100 canales)
+     → Canales públicos de señales organizados por categoría:
+       - Metales: XAU (Gold), XAG (Silver), Copper, NatGas
+       - L1 Crypto: BTC, ETH, SOL, BNB, XRP, ADA, AVAX, TON...
+       - L2/Infra: ARB, OP, SUI, SEI, INJ, NEAR, APT, ZK...
+       - DeFi: AAVE, UNI, LINK, CRV, GMX, PENDLE, DYDX...
+       - AI Tokens: TAO, FET, RENDER, WLD, VIRTUAL, GRT...
+       - Memecoins: DOGE, SHIB, PEPE, WIF, BRETT, PNUT...
+       - Acciones perpetuas: NVDA, TSLA, AAPL, META, GOOGL...
+       - Altcoins: 400+ pares adicionales de BitGet
+
+  2. TRADERS DE TWITTER/X (52 cuentas activas)
+     → Traders profesionales que publican setups con entrada/SL/TP:
+       - Índices: Adam Mancini, Matt NQ Cowboy, Shinobi
+       - Metales: SharperTrades, Gareth Soloway, GoldSilverPete
+       - BTC/ETH: Pentoshi, DonAlt, CredibleCrypto, Hsaka
+       - SOL: Ansem, 0xMert_
+       - L2: DeFi Edge, ChainLinkGod
+       - Memecoins: CaesarETH, Murad, Wazowski
+       - Acciones: Unusual Whales, OptionsHawk, hhhypergrowth
+
+  3. IDEAS DE TRADINGVIEW (RSS en tiempo real)
+     → Ideas publicadas para: BTC, ETH, NQ, ES, XAU, XAG,
+       DXY, OIL — con autor, entrada, TP y SL
+
+  4. ESTRATEGIA PROPIA — X Signals Judeadas (SMC Fabio Valentini)
+     → Bot de scalping SMC que genera señales propias en XAU
+       Ver sección "ESTRATEGIA XSIGNALS" más abajo
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  FLUJO COMPLETO — qué ocurre cada 5 minutos
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Paso 1 — DESCARGA DE DATOS (paralelo, 25 hilos)
+    • Twitter/X via Nitter RSS o cookies del navegador
+    • 100 canales de Telegram via t.me/s/CANAL
+    • TradingView RSS por instrumento
+    • Precios actuales de BitGet (caché por ciclo)
+
+  Paso 2 — VERIFICACIÓN DE POSICIONES ABIERTAS
+    • Para cada posición en open_positions.json:
+      - Obtiene precio actual del instrumento
+      - Si precio >= TP → cierra, alerta Telegram ✅
+      - Si precio <= SL → cierra, alerta Telegram 🛑
+
+  Paso 3 — CICLO DE NOTICIAS
+    • Filtra por keywords financieras (aranceles, Fed, BTC...)
+    • Manda a Groq (LLaMA 3.1) para analizar severidad
+    • Si severidad ALTA o EXTREMA → alerta Telegram inmediata
+    • Descarta noticias políticas sin impacto financiero real
+
+  Paso 4 — CICLO DE SEÑALES
+    a. Filtra mensajes con keywords de trading (long/short/entry...)
+    b. Valida precio: si la entrada del mensaje está >1-3% alejada
+       del precio actual de mercado → DESCARTA (señal obsoleta)
+    c. Groq extrae: instrumento, dirección, entrada, TP, SL
+    d. Descarta si no hay precio concreto
+    e. Guarda en buffer con ventana temporal:
+         SCALP    → 30 min
+         DIA      → 2 horas
+         SWING    → 6 horas
+         POSICION → 12 horas
+    f. Si el trader es STAR (≥5 señales, ≥65% WR) → ejecuta
+       directamente sin esperar confluencia
+
+  Paso 5 — DETECCIÓN DE CONFLUENCIA
+    • Agrupa señales por instrumento + dirección
+    • Calcula peso ponderado (trader con 70% WR vale 1.4x)
+    • Si 2+ traders distintos y peso total ≥ 2.5:
+      - Groq evalúa calidad: ALTA / MEDIA / BAJA
+      - Si ALTA → ejecuta orden en BitGet
+      - Si MEDIA/BAJA → registra pero no ejecuta
+    • Alerta Telegram con todos los traders participantes
+
+  Paso 6 — ESTRATEGIA XSIGNALS (ver sección específica)
+
+  Paso 7 — CICLO DE INSIDERS
+    • Congresistas (QuiverQuant): obligación legal STOCK Act
+    • Cluster de ejecutivos (OpenInsider): 3+ insiders mismo ticker
+    • Si STAR congresista o compra ≥ $50,000 → ejecuta en BitGet
+    • TP automático +5% | SL automático -3%
+
+  Paso 8 — HEARTBEAT cada 6 horas
+    • Telegram: "Bot activo — ciclo #X, alertas hoy: Y"
+    • Lista de posiciones abiertas actualmente
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ESTRATEGIA XSIGNALS JUDEADAS (SMC — Fabio Valentini)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Archivo: xsignals_strategy.py
+  Instrumento: XAU/USDT:USDT (Gold perpetuo en BitGet)
+  Timeframes: 15m para tendencia, 5m para entrada
+  Status en el bot: STAR trader (77.8% WR, 10 señales)
+
+  SESIONES ACTIVAS (UTC):
+    London  → 07:00 – 10:00 UTC
+    New York → 13:30 – 16:30 UTC
+
+  LÓGICA SMC (Smart Money Concepts):
+
+    1. TENDENCIA (15m)
+       Detecta estructura de mercado:
+         UP   → Máximos más altos (HH) + Mínimos más altos (HL)
+         DOWN → Máximos más bajos (LH) + Mínimos más bajos (LL)
+       Fallback si pocos swings: EMA20 vs precio
+
+    2. FAIR VALUE GAP — FVG (5m)
+       Imbalance de 3 velas donde el precio no negocio:
+         Bullish FVG: vela[i-2].high < vela[i].low  → zona de soporte
+         Bearish FVG: vela[i-2].low  > vela[i].high → zona de resistencia
+
+    3. ORDER BLOCK — OB (5m)
+       Última vela contraria antes de un impulso fuerte:
+         Bullish OB: vela bajista + 3 velas alcistas que hacen BOS
+         Bearish OB: vela alcista  + 3 velas bajistas que hacen BOS
+
+    4. ENTRADA
+       Condiciones simultáneas requeridas:
+         ✓ Dentro de sesión London o NY
+         ✓ Tendencia 15m definida (UP o DOWN)
+         ✓ Precio actual dentro de zona FVG o OB alineada con tendencia
+         ✓ Zona en las últimas 15 velas de 5m (fresca)
+       Entrada = precio actual de mercado (no el midpoint histórico)
+
+    5. NIVELES DE RIESGO
+       SL → debajo/sobre la zona + 0.80 USD de buffer
+       TP → entrada + (distancia SL × 2.5) [RR mínimo 2.5:1]
+       SL mínimo 1.5 USD | SL máximo 12 USD desde entrada
+
+  Como STAR trader, sus señales se ejecutan directamente sin
+  esperar confirmación de otros traders.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SISTEMA DE PESOS Y TRADERS STAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Cada trader tiene un peso basado en su historial de aciertos:
+
+    Win rate 30% → peso 0.6  (vale 0.6 traders normales)
+    Win rate 50% → peso 1.0  (neutro, sin historial)
+    Win rate 70% → peso 1.4
+    Win rate 100%→ peso 2.0  (máximo)
+
+  Para confluencia se necesita peso total ≥ 2.5
+
+  TRADER STAR: win rate ≥ 65% con ≥ 5 señales evaluadas
+    → Ejecuta SIN confluencia de otros traders
+    → Solo si CONFIANZA_TRADER es MEDIA o ALTA
+    → Los primeros 5 señales tienen peso 1.0 (neutro)
+
+  El historial se actualiza automáticamente:
+    - Cada señal se guarda en pending_results.json
+    - Tras 6 horas se evalúa: ¿llegó al TP? ¿tocó el SL?
+    - Se actualiza trader_stats.json y el ranking cambia
+
+  Actualmente traders STAR activos:
+    - XSignalsJudeadas (77.8% WR) — estrategia propia
+    - ict_traders (100% WR — Telegram)
+    - xauusd_signals (100% WR — Telegram)
+    - metatrader_signals (100% WR — Telegram)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  INSTRUMENTOS QUE EJECUTA EN BITGET
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  METALES:
+    XAU  → XAU/USDT:USDT   (Gold perpetuo)
+    XAG  → XAG/USDT:USDT   (Silver perpetuo — XAGUSDT en BitGet)
+
+  CRYPTO L1:
+    BTC, ETH, SOL, BNB, XRP, ADA, AVAX, DOT, ATOM, LTC,
+    BCH, TON, TRX, XLM y más
+
+  L2 / INFRA:
+    ARB, OP, SUI, SEI, INJ, NEAR, APT, TIA, ZK, STRK
+
+  DEFI:
+    AAVE, UNI, LINK, CRV, GMX, JUP, PENDLE, LDO, DYDX, RUNE,
+    SUSHI, CAKE, SNX, COMP
+
+  AI TOKENS:
+    TAO, FET, RENDER, WLD, VIRTUAL, GRT, IO, CGPT
+
+  MEMECOINS:
+    DOGE, SHIB, PEPE, WIF, BONK, FLOKI, BRETT, PNUT, BOME,
+    MOODENG, FARTCOIN, TRUMP, TURBO
+
+  ACCIONES PERPETUAS:
+    NVDA, TSLA, AAPL, META, GOOGL, MSFT, AMD, COIN, MSTR,
+    PLTR, AMZN, NFLX, INTC, BA, BABA, GME, HOOD y más
+
+  Total: 543 pares USDT swap activos en BitGet
+
+  IMPORTANTE: NQ y ES (futuros de índices) NO se ejecutan
+  en BitGet. Se alertan por Telegram pero requieren Tradovate
+  o IBKR para operar.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SIZING Y GESTIÓN DE RIESGO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Configuración actual (.env):
+
+    Tipo        Margen   Apal.   Nocional   Liquidación
+    ─────────────────────────────────────────────────────
+    SCALP        $10      5x       $50       si precio -20%
+    DIA          $20      3x       $60       si precio -33%
+    SWING        $50      2x      $100       si precio -50%
+    POSICION    $100      1x      $100       si precio -100%
+    INSIDER      $10      2x       $20       si precio -50%
+
+  PÉRDIDA REAL (con SL correctamente colocado):
+    El riesgo real no es el margen completo, sino:
+    Pérdida = SL% × Nocional
+
+    Ejemplo XAU SCALP:  SL 0.15% lejos → pierde $0.07
+    Ejemplo ETH SCALP:  SL 2.0% lejos  → pierde $1.00
+    Ejemplo PEPE SCALP: SL 8.0% lejos  → pierde $4.00
+
+  BALANCE RECOMENDADO: $1.000
+    Con $1.000:
+      - Scalp = 1% del balance por trade ✓
+      - DIA   = 2% del balance por trade ✓
+      - Swing = 5% del balance por trade ✓
+      - Posición = 10% del balance ⚠ (monitorizar)
+      - Exposición máxima simultánea ≈ 19%
+      - Peor caso con SL en todas ≈ -$13 (-1.3%)
+
+  SIZES SUGERIDOS POR BALANCE:
+    $500  → SCALP=$5,  DIA=$10, SWING=$15, POSICION=$30
+    $1000 → SCALP=$10, DIA=$20, SWING=$30, POSICION=$50
+    $2000 → SCALP=$15, DIA=$30, SWING=$50, POSICION=$100
+    $5000 → SCALP=$30, DIA=$60, SWING=$100, POSICION=$200
+
+  REGLA DE ESCALA: sube sizes un 20% cada vez que el balance
+  suba un 25% desde el último ajuste.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  VALIDACIÓN DE PRECIO (anti-señal obsoleta)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  El bot compara cada entrada extraída con el precio actual de
+  BitGet. Si la diferencia supera el umbral del horizonte,
+  la señal se descarta automáticamente:
+
+    SCALP    → máx 1.0% de desviación permitida
+    DIA      → máx 3.0% de desviación permitida
+    SWING    → máx 7.0% de desviación permitida
+    POSICION → máx 15.0% de desviación permitida
+
+  Ejemplo: Telegram publica "LONG XAU @ 4700" hace 3 horas,
+  ahora XAU está en 4650. Diferencia = 1.07% → para SCALP
+  se descarta, para DIA se acepta.
+
+  Esta validación evita ejecutar señales de horas atrás donde
+  el precio ya se ha movido significativamente.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CÓMO EJECUTAR EL BOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OPCIÓN A — Doble clic en start.bat (Windows)
+    Abre una ventana de consola. Ciérrala para parar el bot.
+
+  OPCIÓN B — Terminal (PowerShell o CMD)
+    cd C:\Users\loren\pasafondeadas\twitter_monitor
+    python tweet_monitor.py --loop
+
+  OPCIÓN C — Un solo ciclo (para testear)
+    python tweet_monitor.py
+
+  Ver log en tiempo real:
+    Get-Content bot_output.log -Wait
+
+  Dashboard web (segunda terminal):
+    python dashboard.py
+    → Abrir http://localhost:5000
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DESPLIEGUE EN RAILWAY (ejecución 24/7)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  El bot está configurado para Railway con:
+    - railway.json (start command: python tweet_monitor.py --loop)
+    - Procfile (worker: python tweet_monitor.py --loop)
+    - requirements.txt (todas las dependencias)
+
+  PASOS PARA DESPLEGAR:
+
+  1. Iniciar sesión en Railway:
+       railway login
+
+  2. Desde la carpeta del bot:
+       cd C:\Users\loren\pasafondeadas\twitter_monitor
+       railway init
+       railway up
+
+  3. Configurar variables de entorno en el dashboard de Railway:
+       GROQ_API_KEY
+       TELEGRAM_BOT_TOKEN
+       TELEGRAM_CHAT_ID
+       EXCHANGE_ID=bitget
+       EXCHANGE_API_KEY
+       EXCHANGE_API_SECRET
+       EXCHANGE_PASSPHRASE
+       TRADE_ENABLED=false          ← cambiar a true para operar real
+       SIZE_SCALP=10
+       SIZE_DIA=20
+       SIZE_SWING=50
+       SIZE_POSICION=100
+       SIZE_INSIDER=10
+       LEV_SCALP=5
+       LEV_DIA=3
+       LEV_SWING=2
+       LEV_POSICION=1
+       LEV_INSIDER=2
+       INSIDER_TP_PCT=5.0
+       INSIDER_SL_PCT=3.0
+
+  4. Monitorizar en Railway dashboard → Deployments → Logs
+
+  NOTA: Railway tiene un plan gratuito con 500 horas/mes.
+  Para ejecución 24/7 se necesita el plan $5/mes (Hobby).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  MODO PAPER vs MODO REAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Por defecto: TRADE_ENABLED=false (paper trading)
+    → El bot analiza, alerta y registra todo
+    → NO coloca órdenes reales en BitGet
+    → Las posiciones se simulan en open_positions.json
+
+  Para activar operativa real:
+    1. Editar .env → TRADE_ENABLED=true
+    2. Reiniciar el bot
+    3. En Railway: railway variables set TRADE_ENABLED=true
+
+  ⚠ IMPORTANTE: Antes de activar modo real:
+    - Verifica que el bot lleva al menos 1 semana en paper
+    - Revisa positions_log.csv: ¿los trades son razonables?
+    - Confirma que las entradas no están obsoletas (ver log)
+    - Empieza con tamaños pequeños (SCALP=$5, DIA=$10)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ARCHIVOS DEL PROYECTO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CÓDIGO PRINCIPAL:
+    tweet_monitor.py       → Bucle principal del bot
+    broker.py              → Conector BitGet (ccxt) + CSV
+    signals_web.py         → Telegram (100 canales) + TradingView RSS
+    insider_signals.py     → Congresistas y cluster de ejecutivos
+    stats.py               → Tracker de aciertos por trader
+    bot_events.py          → Logger de eventos para dashboard
+    dashboard.py           → Dashboard web Flask (puerto 5000)
+    xsignals_strategy.py   → Estrategia propia SMC (X Signals Judeadas)
+
+  CONFIGURACIÓN:
+    .env                   → Credenciales y sizing (NO compartir)
+    accounts.json          → 20 cuentas de noticias (Trump, Fed...)
+    signal_accounts.json   → 52 traders de Twitter/X
+    railway.json           → Config Railway
+    Procfile               → Comando de inicio para Railway
+
+  DATOS (auto-generados):
+    positions_log.csv      → Historial completo de operaciones
+    open_positions.json    → Posiciones abiertas actualmente
+    trader_stats.json      → Win rate histórico por trader
+    pending_results.json   → Señales pendientes de evaluar
+    signals_buffer.json    → Señales activas en ventana temporal
+    bot_events.json        → Feed de eventos del dashboard
+    seen_tweets.json       → IDs ya procesados (evita duplicados)
+    confluenced_keys.json  → Confluencias ya alertadas
+    last_heartbeat.txt     → Timestamp del último heartbeat
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  QUÉ LLEGA AL TELEGRAM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ALERTA DE NOTICIA (severidad ALTA o EXTREMA):
+    🔴 Donald Trump · 14:23 UTC
+    Nuevos aranceles 25% a China
+    NQ  -200 a -350 pts
+    BTC -5% a -8%
+
+  SEÑAL STAR (trader con ≥65% WR):
+    ⭐ SEÑAL STAR · @XSignalsJudeadas · 08:12 UTC
+    XAU 🟢 LARGO — Scalp
+    Entrada    4712.50
+    TP         4724.30
+    SL         4707.20
+    Calidad: ALTA | WR: 78%
+
+  CONFLUENCIA (2+ traders, peso ≥2.5, calidad ALTA):
+    ⚡🟠 CONFLUENCIA DE SEÑALES · 09:45 UTC
+    BTC 🟢 LARGO — 3 traders (peso=4.2)
+    Entrada    94500
+    TP         96000
+    SL         93200
+    Calidad: ALTA | ✅ OPERAR
+
+  POSICIÓN CERRADA:
+    ✅ Posición cerrada — XAU LARGO
+    Entrada: 4712 → Salida: 4724.30
+    TP | PnL: +0.26%
+
+  HEARTBEAT (cada 6h):
+    💚 Bot activo · 12:00 UTC
+    Ciclo #144 | Alertas hoy: 3
+    Posiciones abiertas: XAU LARGO @ 4712
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TRACKER DE ACIERTOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  El bot evalúa cada señal 6 horas después de generada:
+    WIN    → precio llegó al TP
+    LOSS   → precio tocó el SL
+    NEUTRAL → ni TP ni SL, precio subió/bajó <0.2%
+
+  Cada 12 horas envía ranking a Telegram:
+    📊 RANKING DE TRADERS
+    🥇 @XSignalsJudeadas 78% (7✅ 2❌)
+    🥈 @ict_traders 100% (8✅ 0❌)
+    🥉 @metatrader_signals 100% (2✅ 0❌)
+
+  El win rate afecta directamente cuánto "pesa" cada trader
+  en la detección de confluencias. Un trader con 70% WR
+  activa confluencia con menos compañeros que uno del 50%.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  LIMITACIONES CONOCIDAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  - Nitter (scraping de Twitter) puede estar caído. El bot
+    intenta 5 instancias distintas automáticamente.
+
+  - Los canales de Telegram deben ser PÚBLICOS. Los canales
+    privados requieren Telethon con sesión de usuario.
+
+  - NQ y ES (índices CME) no se ejecutan en BitGet. Solo
+    se alertan por Telegram.
+
+  - XAU/XAG en BitGet son perpetuos CRYPTO, no los contratos
+    CME reales. El precio puede diferir ligeramente del spot.
+
+  - Acciones en BitGet (NVDA, TSLA...) tienen horario limitado
+    (lunes-viernes, no 24/7). El bot opera solo cuando el par
+    está activo.
+
+  - Groq (LLaMA 3.1-8b) es gratis y rápido pero puede
+    malinterpretar tweets en idiomas poco comunes o con
+    muchos emojis.
+
+  - La estrategia XSignals solo opera XAU y solo en sesiones
+    London (07-10 UTC) y NY (13:30-16:30 UTC).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HISTORIAL DE CAMBIOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Mayo 2026 — v1.0 inicial
+    - Bot base: 20 noticias + 136 señales + insiders
+    - Canales Telegram: Gold, BTC, ETH, Indices
+    - Ejecuta: XAU, BTC, ETH + acciones en BitGet
+
+  Mayo 2026 — v1.1 XSignals + Railway
+    - Añadida estrategia SMC propia (xsignals_strategy.py)
+      estilo Fabio Valentini: estructura 15m + FVG + OB 5m
+    - XSignals configurado como STAR trader (77.8% WR)
+    - Configuración Railway (railway.json + Procfile)
+    - Añadido XAG (Silver) al SYMBOL_MAP de broker.py
+    - XAG añadido a TradingView RSS y canales Telegram
+
+  Mayo 2026 — v1.2 Expansión 543 pares BitGet
+    - signal_accounts.json: limpieza + 52 traders activos
+      organizados por: NQ/ES, metales, BTC/ETH, SOL, L2,
+      DeFi, AI tokens, memecoins, acciones
+    - TELEGRAM_CHANNELS: 100 canales cubriendo todos los
+      pares de BitGet por categoría
+    - SIGNAL_KEYWORDS ampliado con todos los tickers
+    - YFINANCE_MAP ampliado (XAG, metales, acciones)
+
+  Mayo 2026 — v1.3 Validación de precio anti-obsolescencia
+    - _build_price_cache(): caché de precios al inicio de ciclo
+    - _is_entry_stale(): descarta señales con entrada >1-15%
+      lejos del precio actual (según horizonte)
+    - XSignals: entrada = precio actual de mercado
+      (no midpoint histórico de la zona)
+
+==============================================================

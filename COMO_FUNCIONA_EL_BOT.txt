@@ -1,0 +1,508 @@
+==============================================================
+  TWITTER MONITOR — COMO FUNCIONA EL BOT
+  Monitor de Alertas de Mercado + Señales de Traders
+  Actualizado: Mayo 2026
+==============================================================
+
+QUE HACE ESTE BOT
+-----------------
+Monitorea en tiempo real tres fuentes de informacion:
+
+  1. Cuentas de noticias (Trump, Fed, Tesoro, etc.)
+     → Si publican algo que mueva el mercado, te avisa por Telegram
+
+  2. 136+ traders profesionales (Twitter/X, TradingView, Telegram)
+     → Si 3 o mas traders dan la misma señal al mismo tiempo
+       (ej: 3 traders dicen LARGO en XAU), te avisa por Telegram
+       y puede ejecutar la orden en BitGet automaticamente
+
+  3. Insiders y congresistas (operaciones legales publicas)
+     → Si Nancy Pelosi, un CEO, o un grupo de ejecutivos compran
+       acciones relevantes, te avisa por Telegram y lo ejecuta
+       en BitGet si es trader STAR o cluster de 3+ insiders
+
+Todo queda registrado en positions_log.csv para que tengas
+un historial completo de cada señal y operacion.
+
+El dashboard en http://localhost:5000 muestra todo en tiempo real.
+
+
+==============================================================
+COMO CORRERLO
+==============================================================
+
+OPCION A — Doble clic en start.bat
+  Abre una ventana de consola con el bot corriendo.
+  Cierra la ventana para pararlo.
+
+OPCION B — Desde terminal (PowerShell o CMD)
+  cd C:\Users\loren\pasafondeadas\twitter_monitor
+  python tweet_monitor.py --loop
+
+OPCION C — Un solo ciclo (para testear)
+  python tweet_monitor.py
+  (Sin --loop: corre una vez y termina)
+
+Ver el log en tiempo real (en PowerShell):
+  Get-Content bot_output.log -Wait
+
+Abrir el dashboard web (segunda terminal):
+  python dashboard.py
+  Luego abre http://localhost:5000 en el navegador
+
+
+==============================================================
+CONFIGURACION (.env)
+==============================================================
+
+  GROQ_API_KEY=...           ← IA que analiza los tweets (gratis)
+  TELEGRAM_BOT_TOKEN=...     ← Token del bot de Telegram
+  TELEGRAM_CHAT_ID=...       ← ID del grupo/chat donde llegan las alertas
+
+  EXCHANGE_ID=bitget         ← Exchange para ejecutar ordenes
+  EXCHANGE_API_KEY=...       ← API key de BitGet
+  EXCHANGE_API_SECRET=...    ← Secret de BitGet
+  EXCHANGE_PASSPHRASE=...    ← Passphrase de BitGet
+  TRADE_ENABLED=false        ← false=paper trading | true=ordenes reales
+
+  SIZE_SCALP=10              ← Dolares por operacion scalp
+  SIZE_DIA=20                ← Dolares por operacion intraday
+  SIZE_SWING=20              ← Dolares por operacion swing
+  SIZE_POSICION=20           ← Dolares por posicion larga
+  SIZE_INSIDER=10            ← Dolares por operacion insider
+
+  LEV_SCALP=5                ← Apalancamiento scalp
+  LEV_DIA=3                  ← Apalancamiento intraday
+  LEV_SWING=2                ← Apalancamiento swing
+  LEV_POSICION=1             ← Sin apalancamiento para posiciones
+  LEV_INSIDER=2              ← Apalancamiento operaciones insider
+
+  INSIDER_TP_PCT=5.0         ← Take profit automatico +5% en insiders
+  INSIDER_SL_PCT=3.0         ← Stop loss automatico -3% en insiders
+
+IMPORTANTE: TRADE_ENABLED=false significa que el bot
+ANALIZA y ALERTA pero NO coloca ordenes reales en BitGet.
+Para ir live: cambia a TRADE_ENABLED=true en el .env.
+
+
+==============================================================
+INSTRUMENTOS QUE PUEDE OPERAR (BitGet perpetuos)
+==============================================================
+
+  Crypto:
+    BTC  → BTC/USDT:USDT
+    ETH  → ETH/USDT:USDT
+
+  Metales:
+    XAU / GOLD / GC / ORO → XAU/USDT:USDT (Gold perpetuo en BitGet)
+
+  Acciones (perpetuos BitGet):
+    NVDA → NVDA/USDT:USDT
+    AAPL → AAPL/USDT:USDT
+    TSLA → TSLA/USDT:USDT
+    MSFT → MSFT/USDT:USDT
+    GOOGL → GOOGL/USDT:USDT
+    META → META/USDT:USDT
+    COIN → COIN/USDT:USDT
+    MSTR → MSTR/USDT:USDT
+
+  Tamaño minimo por operacion: ~$5 nocional (lo que alcance con el SIZE)
+  Señales de NQ y ES se alertan por Telegram pero no ejecutan en BitGet
+  (requieren Tradovate o IBKR para futuros de indices)
+
+
+==============================================================
+FUENTES QUE MONITOREA
+==============================================================
+
+FUENTE 1 — CUENTAS DE NOTICIAS (20 cuentas)
+  Ejemplos: Donald Trump, White House, Scott Bessent (Tesoro),
+            US Treasury, US Trade Rep, etc.
+  Via: Nitter RSS (lectura publica de Twitter/X, sin cuenta)
+  Que busca: tweets sobre aranceles, tasas, inflacion, Fed,
+             GDP, sanciones, petroleo, Bitcoin, etc.
+  Filtro de severidad:
+    BAJA   → ignorado (comentario rutinario)
+    MEDIA  → ignorado (impacto limitado)
+    ALTA   → ALERTA Telegram (mueve mercado 100-400 pts NQ)
+    EXTREMA → ALERTA Telegram (shock: aranceles, crisis, guerra)
+
+FUENTE 2 — TRADERS DE SEÑALES (136+ traders)
+  Via: TradingView Ideas RSS + canales de Telegram + Twitter RSS
+  Canales de Telegram monitoreados (ejemplos):
+    - FX Leaders XAU (Gold signals)
+    - ICT Traders (XAUUSD)
+    - Quant Signals (NQ/indices)
+    - Gold Forex VIP, United Signals FX, Anabel Signals
+    - Metatrader Signals, Biaheza Signals, XAUUSD Signals
+    - ES Signals, y mas...
+  Que busca: señales con ENTRY + SL + TP concretos
+  Como funciona la confluencia (con ponderacion por win rate):
+    → Cada señal se guarda en memoria con ventana dinamica:
+        SCALP    → 30 minutos
+        DIA      → 2 horas
+        SWING    → 6 horas
+        POSICION → 12 horas
+    → Cada trader tiene un PESO segun su historial:
+        50% win rate → peso 1.0 (neutro)
+        70% win rate → peso 1.4 (vale 1.4 traders normales)
+        30% win rate → peso 0.6 (casi no cuenta)
+        Nuevos traders (menos de 5 señales) → peso 1.0
+    → Si la suma de pesos >= 3.0 en el mismo instrumento+direccion:
+        dispara ALERTA de CONFLUENCIA por Telegram
+    → La IA (Groq) evalua la calidad: BAJA / MEDIA / ALTA
+    → Ejecuta orden en BitGet si hay confluencia (XAU, BTC, ETH,
+      acciones del SYMBOL_MAP)
+
+FUENTE 3 — INSIDERS Y CONGRESISTAS
+  Congresistas (QuiverQuant):
+    → Obligados por ley (STOCK Act) a declarar compras en 45 dias
+    → El bot revisa los ultimos 2 dias de compras
+    → Solo alerta sobre tickers relevantes (NVDA, AAPL, BTC proxies, etc.)
+    → Marca con ESTRELLA a los mas predictivos (Nancy Pelosi, etc.)
+    → EJECUTA en BitGet si es trader STAR o compra >= $50,000
+    → Solo registra (no ejecuta) si es congresista normal sin historial
+  Cluster buys de ejecutivos (OpenInsider):
+    → CEOs, directores, CFOs que compran acciones propias
+    → Solo alerta cuando 3+ insiders del mismo ticker compran
+    → SIEMPRE intenta ejecutar (señal mas fuerte que un solo congresista)
+  Para insiders: TP automatico +5% | SL automatico -3%
+  Todo queda registrado en positions_log.csv con fuente INSIDER
+
+
+==============================================================
+COMO ANALIZA LOS TWEETS (IA con Groq)
+==============================================================
+
+El bot usa el modelo llama-3.1-8b-instant (gratis, muy rapido).
+Para cada tweet relevante hace dos analisis:
+
+ANALISIS DE NOTICIAS:
+  Determina: ¿Es relevante? ¿Severidad? ¿Impacto en NQ/SP500/BTC?
+  Ejemplo de respuesta:
+    RELEVANTE: SI
+    SEVERIDAD: ALTA
+    TEMA: Nuevos aranceles China 25%
+    RESUMEN: Trump anuncia aranceles del 25% a productos chinos
+    DIRECCION: BAJISTA
+    NQ_PUNTOS: -200 a -350
+    SP500_PUNTOS: -40 a -70
+    BTC_PCT: -5% a -8%
+    RAZON: Escalada comercial presiona equities y risk assets
+
+ANALISIS DE SEÑALES:
+  Determina: ¿Es una señal activa? ¿Instrumento? ¿Entrada? ¿TP? ¿SL?
+  Solo marca SENAL: SI si tiene precio concreto y direccion clara.
+  Ejemplo:
+    SENAL: SI
+    INSTRUMENTO: XAU
+    DIRECCION: LARGO
+    ENTRADA: 3320-3325
+    TP: 3345
+    SL: 3310
+    CONFIANZA_TRADER: ALTA
+    HORIZONTE: SCALP
+
+EVALUACION DE CONFLUENCIA:
+  Cuando el peso acumulado de traders >= 3.0 en el mismo grupo:
+    CALIDAD: ALTA
+    ENTRADA: 3322 (promedio de los traders)
+    TP: 3345
+    SL: 3310
+    RECOMENDACION: OPERAR
+
+
+==============================================================
+QUE LLEGA A TELEGRAM
+==============================================================
+
+ALERTA DE NOTICIA (ejemplo):
+  Donald Trump · 14:23 UTC
+
+  Acuerdo comercial con China — suspension de aranceles 90 dias
+
+  COMERCIO CHINA — Severidad: ALTA
+  NQ    +180 a +250 pts
+  SP500  +35 a +55 pts
+  BTC    +4% a +7%
+
+ALERTA DE CONFLUENCIA (ejemplo):
+  CONFLUENCIA DE SEÑALES · 15:41 UTC
+
+  XAU LARGO — 4 traders (peso=5.6)
+  Scalp (min-horas)
+
+  Entrada       3320-3325
+  TP                 3345
+  SL                 3310
+
+  Calidad: ALTA | OPERAR
+
+  Traders:
+  • @ICT_Traders [SCALP] — Entrada 3320 | TP 3345 | SL 3308
+  • @gold_signals [SCALP] — Entrada 3325 | TP 3340 | SL 3312
+  • @FXLeaders [SCALP] — Entrada 3322 | TP 3350 | SL 3310
+
+ALERTA DE INSIDER (ejemplo):
+  CONGRESISTA COMPRA
+  Nancy Pelosi compro $NVDA — $500,001 - $1,000,000
+  Retorno excess vs SPY: +34.2%
+
+MENSAJE DEL BROKER (si hay posicion ejecutada):
+  Broker: ORDEN — SCALP | BUY XAU/USDT:USDT @ 3322
+          | TP 3484.1 | SL 3215.3 | $10 x5lev | id 123456
+
+HEARTBEAT (cada 6 horas):
+  Bot activo · 14:00 UTC
+  Ciclo #72 | Alertas hoy: 3
+
+  Posiciones abiertas:
+    XAU: LARGO @ 3322 | TP 3345 | SL 3310
+    NVDA: LARGO @ 875.50 | TP 919.3 | SL 849.2
+
+
+==============================================================
+TRACKING DE POSICIONES ABIERTAS
+==============================================================
+
+El bot mantiene open_positions.json con todas las posiciones
+activas. En cada ciclo verifica si se alcanzo el TP o SL:
+
+  - Si el precio actual >= TP → cierra posicion, envia alerta
+  - Si el precio actual <= SL → cierra posicion, envia alerta
+
+Ejemplo de open_positions.json:
+  {
+    "XAU": {
+      "direction": "LARGO",
+      "entry": 3322.0,
+      "tp": 3484.1,
+      "sl": 3215.3,
+      "horizonte": "INSIDER",
+      "opened_at": "2026-05-01T14:23:00+00:00"
+    }
+  }
+
+Esto evita abrir posiciones duplicadas en el mismo instrumento.
+
+
+==============================================================
+REGISTRO DE POSICIONES (positions_log.csv)
+==============================================================
+
+Cada vez que el bot detecta una señal ejecutable O una
+operacion de insider, queda registrado en este archivo.
+Lo puedes abrir con Excel o Google Sheets.
+
+Columnas:
+  Fecha        → cuando ocurrio
+  Hora UTC     → hora exacta
+  Fuente       → "confluencia" / "congresista" / "insider_cluster"
+  Instrumento  → BTC, ETH, XAU, NQ, NVDA, etc.
+  Simbolo      → symbol del exchange (XAU/USDT:USDT)
+  Direccion    → LARGO o CORTO
+  Entrada      → precio de entrada
+  TP           → take profit
+  SL           → stop loss
+  Tamanio USD  → dolares usados
+  Leverage     → apalancamiento
+  Horizonte    → SCALP / DIA / SWING / POSICION / INSIDER
+  Calidad      → ALTA / MEDIA / BAJA / INFO
+  Modo         → PAPER / LIVE / INSIDER / SKIP / ERROR
+  Order ID     → ID de la orden en BitGet (si es LIVE)
+  Estado       → resultado o mensaje
+  Notas        → informacion adicional
+
+
+==============================================================
+DASHBOARD WEB (localhost:5000)
+==============================================================
+
+Abre una segunda terminal y ejecuta:
+  python dashboard.py
+
+Luego visita: http://localhost:5000
+
+El dashboard muestra en tiempo real (actualiza cada 15s):
+
+  ENCABEZADO
+  → Modo: PAPER TRADING o LIVE TRADING
+  → Reloj en tiempo real (UTC)
+
+  ESTADISTICAS GLOBALES
+  → Posiciones abiertas | Alertas hoy | Total operaciones
+  → Win rate % | Wins/Losses
+
+  PRECIOS EN VIVO
+  → BTC, ETH, XAU, NVDA, AAPL con variacion %
+
+  GRAFICAS (velas de 1h via TradingView Lightweight Charts)
+  → Pestañas: BTC | XAU | ETH | NVDA | AAPL
+
+  POSICIONES ABIERTAS
+  → Instrumento, direccion, entrada, TP, SL en tarjetas
+
+  FEED DE EVENTOS EN TIEMPO REAL
+  → Cada accion del bot aparece en tiempo real con color:
+      Azul     → SIGNAL (señal detectada de un trader)
+      Violeta  → CONFLUENCE (confluencia detectada)
+      Verde    → BROKER (orden ejecutada)
+      Naranja  → INSIDER (congresista o cluster)
+      Amarillo → NEWS (noticia de mercado)
+      Rojo     → CLOSE (posicion cerrada)
+      Rojo     → ERROR
+      Gris     → HEARTBEAT / INFO
+
+  RANKING DE TRADERS
+  → Tabla con: Trader | Señales | Aciertos | Win Rate (barra)
+
+  HISTORIAL DE OPERACIONES
+  → Tabla completa de positions_log.csv
+
+
+==============================================================
+ARCHIVOS DEL PROYECTO
+==============================================================
+
+  tweet_monitor.py      → Bot principal — ejecutar este
+  broker.py             → Conector BitGet (ccxt) + registro CSV
+  insider_signals.py    → Fetch de congresistas y cluster buys
+  signals_web.py        → Fetch de TradingView + Telegram publicos
+  stats.py              → Tracker de aciertos por trader (leaderboard)
+  bot_events.py         → Logger de eventos para el dashboard
+  dashboard.py          → Servidor Flask del dashboard (puerto 5000)
+  accounts.json         → 20 cuentas de noticias a monitorear
+  signal_accounts.json  → 136+ traders de señales
+  start.bat             → Doble clic para arrancar en Windows
+  .env                  → Credenciales y configuracion (NO compartir)
+
+  positions_log.csv     → REGISTRO de todas las operaciones (auto-creado)
+  open_positions.json   → Posiciones abiertas actualmente (auto-creado)
+  bot_events.json       → Feed de eventos del dashboard (auto-creado)
+  bot_output.log        → Log del bot en tiempo real
+  seen_tweets.json      → Tweets ya procesados (evita duplicados)
+  signals_buffer.json   → Señales activas en ventana dinamica
+  confluenced_keys.json → Confluencias ya alertadas (evita repetir)
+  pending_results.json  → Señales pendientes de evaluar resultado
+  trader_stats.json     → Estadisticas de aciertos por trader
+  last_heartbeat.txt    → Timestamp del ultimo heartbeat enviado
+
+
+==============================================================
+FLUJO COMPLETO DE UNA EJECUCION
+==============================================================
+
+Cada 5 minutos el bot:
+
+  1. Lee accounts.json y signal_accounts.json
+  2. Descarga tweets en paralelo (25 hilos) de todas las cuentas
+  3. Descarga ideas de TradingView RSS (30 ideas)
+  4. Descarga mensajes de canales de Telegram publicos (181 mensajes)
+
+  ── VERIFICACION DE POSICIONES ABIERTAS ──
+  5. Para cada posicion en open_positions.json:
+     → Obtiene precio actual del instrumento (ccxt)
+     → Si precio >= TP: cierra posicion, alerta Telegram "TP alcanzado"
+     → Si precio <= SL: cierra posicion, alerta Telegram "SL alcanzado"
+
+  ── CICLO DE NOTICIAS ──
+  6. Para cada tweet de noticias:
+     a. Filtra por palabras clave financieras
+     b. Descarta tweets politicos sin impacto financiero real
+     c. Manda a Groq para analizar severidad e impacto
+     d. Si severidad ALTA o EXTREMA: envia alerta a Telegram
+     e. Registra evento en bot_events.json (dashboard)
+
+  ── CICLO DE SEÑALES ──
+  7. Para cada mensaje de traders:
+     a. Filtra por palabras clave de trading (long, short, entry, TP...)
+     b. Manda a Groq para extraer: instrumento, direccion, entrada, TP, SL
+     c. Descarta si no hay precio concreto
+     d. Guarda la señal en memoria con ventana segun HORIZONTE
+     e. Registra evento SIGNAL en bot_events.json
+  8. Agrupa señales por instrumento + direccion
+  9. Calcula peso acumulado (trader bueno = mas peso)
+     Si suma de pesos >= 3.0 con 3+ traders distintos:
+     a. Manda a Groq para evaluar consenso y calidad
+     b. Envia alerta de CONFLUENCIA a Telegram
+     c. Registra evento CONFLUENCE en bot_events.json
+     d. Si el instrumento esta en SYMBOL_MAP: ejecuta orden en BitGet
+     e. Registra en positions_log.csv y open_positions.json
+
+  ── CICLO DE INSIDERS ──
+  10. Descarga compras recientes de congresistas (QuiverQuant)
+  11. Filtra las relevantes para nuestros instrumentos
+  12. Envia alerta a Telegram + registra en bot_events.json
+  13. Si es STAR trader o compra >= $50k: ejecuta en BitGet
+  14. Descarga cluster buys de OpenInsider (3+ ejecutivos mismo ticker)
+  15. Alerta + ejecuta en BitGet para los clusters relevantes
+
+  ── HEARTBEAT (cada 6 horas) ──
+  16. Si han pasado 6+ horas del ultimo heartbeat:
+      Envia a Telegram resumen con posiciones abiertas y alertas del dia
+
+  17. Guarda estado (seen_tweets, signals_buffer, confluenced_keys)
+
+
+==============================================================
+TRACKER DE ACIERTOS (stats.py)
+==============================================================
+
+El bot lleva la cuenta de cuantas señales acertaron:
+
+  - Cada señal se guarda en pending_results.json
+  - Despues de 6 horas evalua si el trade habria ganado o perdido
+    comparando precio de entrada vs precio actual (yfinance)
+  - Mantiene un leaderboard de traders por win rate en trader_stats.json
+  - Cada 12 horas manda el ranking a Telegram:
+    "Top traders esta semana: @trader1 (78% WR), @trader2 (65% WR)..."
+  - El win rate de cada trader afecta su PESO en la confluencia:
+    Un trader con 70% WR vale 1.4x mas que uno sin historial
+
+
+==============================================================
+COMO ACTIVAR LAS ORDENES REALES EN BITGET
+==============================================================
+
+BitGet ya esta configurado y conectado.
+Por defecto el bot esta en PAPER TRADING (solo alertas, no ordenes).
+
+Para activar ordenes reales:
+  1. Abre el archivo .env
+  2. Cambia: TRADE_ENABLED=false  →  TRADE_ENABLED=true
+  3. Reinicia el bot (cierra la ventana y vuelve a abrir start.bat)
+
+Sizing actual configurado:
+  Scalp    → $10 con 5x apalancamiento = $50 nocional
+  Dia      → $20 con 3x apalancamiento = $60 nocional
+  Swing    → $20 con 2x apalancamiento = $40 nocional
+  Posicion → $20 sin apalancamiento = $20 nocional
+  Insider  → $10 con 2x apalancamiento = $20 nocional
+
+
+==============================================================
+LIMITACIONES CONOCIDAS
+==============================================================
+
+  - Nitter (scraping de Twitter) puede estar caido a veces.
+    El bot intenta 5 instancias distintas de Nitter automaticamente.
+    Si todas fallan, esa cuenta se salta sin error.
+
+  - Las señales de NQ/ES NO se ejecutan en BitGet.
+    Se alertan por Telegram pero requieres Tradovate o IBKR.
+
+  - XAU (Gold), NVDA, AAPL, TSLA y otras acciones SI se ejecutan
+    en BitGet como perpetuos (spot leverage, no futuros CME).
+    Revisa los horarios de BitGet para acciones (no 24/7).
+
+  - La confluencia requiere MINIMO 3 traders distintos Y que la
+    suma de sus pesos sea >= 3.0. Una señal de un solo trader,
+    aunque sea bueno, no activa nada.
+
+  - El modelo de Groq (llama-3.1-8b-instant) es rapido y gratis
+    pero puede cometer errores al interpretar tweets complejos.
+
+  - El dashboard muestra datos en tiempo real pero requiere tener
+    dashboard.py corriendo en una segunda terminal aparte.
+
+==============================================================
