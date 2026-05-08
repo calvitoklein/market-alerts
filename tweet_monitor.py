@@ -637,6 +637,20 @@ def send_telegram_photo(token: str, chat_id: str, photo_url: str, caption: str) 
     except Exception:
         return False
 
+def send_telegram_photo_bytes(token: str, chat_id: str, image_bytes: bytes, caption: str) -> bool:
+    """Envía imagen como archivo binario (para fotos descargadas por Telethon)."""
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data={"chat_id": chat_id, "caption": caption[:1024],
+                  "parse_mode": "HTML"},
+            files={"photo": ("signal.jpg", image_bytes, "image/jpeg")},
+            timeout=20,
+        )
+        return r.ok
+    except Exception:
+        return False
+
 def clean_buffer(buf: list) -> list:
     now = datetime.now(timezone.utc)
     def _valid(s):
@@ -965,14 +979,31 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     continue
 
                 seen.add(tid)
-                direc = sig.get("DIRECCION", "?")
+                direc   = sig.get("DIRECCION", "?")
+                tp_v    = sig.get("TP", "N/A")
+                sl_v    = sig.get("SL", "N/A")
+                hor_v   = sig.get("HORIZONTE", "DIA")
+                dir_str = DIR_SIGNAL.get(direc, direc)
                 print(f"  [VISION] @{handle}: {instr} {direc} entrada={entrada} (imagen)")
                 log_event("SIGNAL", f"@{handle} [imagen]: {instr} {direc} entrada={entrada}", {
                     "handle": handle, "name": ch_name, "source": "vision",
                     "instrumento": instr, "direccion": direc,
-                    "entrada": entrada, "tp": sig.get("TP",""), "sl": sig.get("SL",""),
-                    "horizonte": sig.get("HORIZONTE","DIA"),
+                    "entrada": entrada, "tp": tp_v, "sl": sl_v, "horizonte": hor_v,
                 })
+
+                # Enviar foto + datos al chat Telegram inmediatamente
+                _vis_caption = (
+                    f"📸 <b>Señal detectada en imagen</b> · @{handle}\n\n"
+                    f"<b>{instr} {dir_str}</b>\n"
+                    f"<pre>"
+                    f"Entrada  {entrada:>20}\n"
+                    f"TP       {tp_v:>20}\n"
+                    f"SL       {sl_v:>20}"
+                    f"</pre>\n"
+                    f"<i>Extraído por Gemini Vision — entra al buffer de confluencia</i>"
+                )
+                send_telegram_photo_bytes(tg_token, tg_chat, img_bytes, _vis_caption)
+
                 entry = {
                     "ts":               now_iso,
                     "id":               tid,
@@ -984,10 +1015,10 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     "INSTRUMENTO":      instr,
                     "DIRECCION":        direc,
                     "ENTRADA":          entrada,
-                    "TP":               sig.get("TP", "N/A"),
-                    "SL":               sig.get("SL", "N/A"),
+                    "TP":               tp_v,
+                    "SL":               sl_v,
                     "CONFIANZA_TRADER": "MEDIA",
-                    "HORIZONTE":        sig.get("HORIZONTE", "DIA"),
+                    "HORIZONTE":        hor_v,
                     "RESUMEN":          f"{instr} {direc} — señal por imagen",
                 }
                 signals_buffer.append(entry)

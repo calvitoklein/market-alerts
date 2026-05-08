@@ -14,7 +14,6 @@ Setup (una sola vez en local):
 import os
 import io
 import asyncio
-import sys
 import base64
 import time
 
@@ -162,8 +161,6 @@ def fetch_channels_with_images(channels: dict) -> list:
     if not TELEGRAM_SESSION:
         return []
     try:
-        if sys.platform == "win32":
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         return asyncio.run(_fetch_async(channels))
     except RuntimeError:
         # Si ya hay un event loop corriendo (pytest, Jupyter), usar nest_asyncio
