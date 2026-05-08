@@ -923,6 +923,84 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     except Exception as _e:
         print(f"  [XSIG] Error: {_e}")
 
+    # ── Análisis de imágenes Telegram (Telethon + Gemini Vision) ──────────────
+    try:
+        from telegram_vision import fetch_channels_with_images, analyze_image, is_configured, GEMINI_CALL_DELAY
+        if is_configured():
+            from signals_web import TELEGRAM_CHANNELS as _TG_CHANNELS
+            print(f"  [VISION] Descargando imágenes de {len(_TG_CHANNELS)} canales...")
+            vision_msgs = fetch_channels_with_images(_TG_CHANNELS)
+            img_total  = sum(1 for _, _, _, img, _ in vision_msgs if img)
+            print(f"  [VISION] {len(vision_msgs)} mensajes | {img_total} fotos")
+
+            img_analyzed = 0
+            for (ch_name, handle, text, img_bytes, msg_id) in vision_msgs:
+                if not img_bytes:
+                    continue
+                tid = f"tg_img_{handle}_{msg_id}"
+                if tid in seen or img_analyzed >= 25:
+                    continue
+
+                time.sleep(GEMINI_CALL_DELAY)
+                sig = analyze_image(img_bytes)
+                img_analyzed += 1
+
+                if not sig:
+                    continue
+
+                instr = sig.get("INSTRUMENTO", "").upper()
+                # Filtrar instrumentos no soportados en BitGet
+                try:
+                    from broker import SYMBOL_MAP as _SM2
+                    if instr not in _SM2:
+                        print(f"    [VISION] @{handle}: {instr} no en BitGet — skip")
+                        continue
+                except Exception:
+                    pass
+
+                entrada = sig.get("ENTRADA", "N/A")
+                _stale2 = _is_entry_stale(instr, entrada, sig.get("HORIZONTE", "DIA"), price_cache)
+                if _stale2:
+                    print(f"    [VISION] @{handle}: entrada {entrada} obsoleta ({_stale2}) — skip")
+                    continue
+
+                seen.add(tid)
+                direc = sig.get("DIRECCION", "?")
+                print(f"  [VISION] @{handle}: {instr} {direc} entrada={entrada} (imagen)")
+                log_event("SIGNAL", f"@{handle} [imagen]: {instr} {direc} entrada={entrada}", {
+                    "handle": handle, "name": ch_name, "source": "vision",
+                    "instrumento": instr, "direccion": direc,
+                    "entrada": entrada, "tp": sig.get("TP",""), "sl": sig.get("SL",""),
+                    "horizonte": sig.get("HORIZONTE","DIA"),
+                })
+                entry = {
+                    "ts":               now_iso,
+                    "id":               tid,
+                    "handle":           handle,
+                    "name":             ch_name,
+                    "link":             f"https://t.me/{handle}",
+                    "img":              "",
+                    "text":             text[:200] if text else "[imagen]",
+                    "INSTRUMENTO":      instr,
+                    "DIRECCION":        direc,
+                    "ENTRADA":          entrada,
+                    "TP":               sig.get("TP", "N/A"),
+                    "SL":               sig.get("SL", "N/A"),
+                    "CONFIANZA_TRADER": "MEDIA",
+                    "HORIZONTE":        sig.get("HORIZONTE", "DIA"),
+                    "RESUMEN":          f"{instr} {direc} — señal por imagen",
+                }
+                signals_buffer.append(entry)
+                from stats import add_pending_signal
+                add_pending_signal(entry)
+
+            if img_analyzed:
+                print(f"  [VISION] {img_analyzed} imágenes analizadas | {sum(1 for e in signals_buffer if e.get('id','').startswith('tg_img_'))} señales por imagen en buffer")
+        else:
+            print("  [VISION] No configurado (falta TELEGRAM_SESSION o GEMINI_API_KEY)")
+    except Exception as _ve:
+        print(f"  [VISION] Error: {_ve}")
+
     # Detectar confluencia por instrumento + dirección
     groups = defaultdict(list)
     for s in signals_buffer:
