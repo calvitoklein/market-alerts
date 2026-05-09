@@ -50,19 +50,18 @@ SENAL: NO"""
 
 # ── Gemini ─────────────────────────────────────────────────────────────────────
 
-_gemini_model = None
+_gemini_client = None
 
-def _get_gemini_model():
-    global _gemini_model
-    if _gemini_model:
-        return _gemini_model
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client:
+        return _gemini_client
     if not GEMINI_API_KEY:
         return None
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel("gemini-2.0-flash")
-        return _gemini_model
+        from google import genai
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        return _gemini_client
     except Exception as e:
         print(f"  [VISION] Gemini init error: {e}")
         return None
@@ -70,21 +69,22 @@ def _get_gemini_model():
 
 def analyze_image(image_bytes: bytes) -> dict | None:
     """
-    Envía imagen a Gemini Flash y extrae señal de trading.
+    Envía imagen a Gemini 2.0 Flash y extrae señal de trading.
     Devuelve dict con claves INSTRUMENTO/DIRECCION/ENTRADA/TP/SL/HORIZONTE,
     o None si no hay señal clara.
     """
-    model = _get_gemini_model()
-    if not model or not image_bytes:
+    client = _get_gemini_client()
+    if not client or not image_bytes:
         return None
     try:
-        import google.generativeai as genai
-        img_part = genai.types.Part.from_bytes(
-            data=image_bytes,
-            mime_type="image/jpeg",
+        from google import genai
+        from google.genai import types as gtypes
+        img_part = gtypes.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+        resp = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[VISION_PROMPT, img_part],
         )
-        resp  = model.generate_content([VISION_PROMPT, img_part])
-        raw   = resp.text.strip()
+        raw = resp.text.strip()
         result = {}
         for line in raw.split("\n"):
             if ":" in line:
@@ -93,12 +93,15 @@ def analyze_image(image_bytes: bytes) -> dict | None:
 
         if result.get("SENAL", "NO").upper() != "SI":
             return None
-        # Requiere al menos dirección e instrumento legibles
         if not result.get("INSTRUMENTO") or not result.get("DIRECCION"):
             return None
         return result
     except Exception as e:
-        print(f"  [VISION] Gemini error: {e}")
+        err = str(e)
+        if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+            print(f"  [VISION] Gemini rate limit — skip imagen")
+        else:
+            print(f"  [VISION] Gemini error: {err[:120]}")
         return None
 
 
