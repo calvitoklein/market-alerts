@@ -825,6 +825,15 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             if not any(kw in text_lower for kw in SIGNAL_KEYWORDS):
                 continue
 
+            # Segundo filtro: señal accionable = debe tener dirección Y número (precio)
+            _has_direction = any(kw in text_lower for kw in {
+                "long", "short", "buy", "sell", "largo", "corto", "compra", "venta",
+                "entry", "entrada", "signal", "señal", "trade now", "open",
+            })
+            _has_number = bool(re.search(r'\b\d{2,6}(?:[.,]\d+)?\b', text))
+            if not (_has_direction and _has_number):
+                continue
+
             print(f"  [SIGNAL] @{handle}: {text[:60]}...")
             time.sleep(GROQ_CALL_DELAY)
             sig = extract_signal(text, name, handle, client)
