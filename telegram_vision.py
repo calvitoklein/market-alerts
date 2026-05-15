@@ -1,9 +1,9 @@
 """
-Telethon + Google Gemini Vision — análisis de imágenes de señales Telegram.
+Telethon + Gemini Flash Vision — análisis de imágenes y texto de señales Telegram.
 
 Flujo:
   1. Telethon conecta como usuario real y descarga fotos de los canales.
-  2. Gemini 2.0 Flash (gratis: 1500 req/día, 15 RPM) analiza cada imagen.
+  2. Gemini Flash (multimodal) analiza imagen + texto juntos en una sola llamada.
   3. Señales extraídas van al mismo buffer que las señales de texto.
 
 Setup (una sola vez en local):
@@ -14,8 +14,9 @@ Setup (una sola vez en local):
 import os
 import io
 import asyncio
-import base64
 import time
+import re
+from datetime import datetime, timezone
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -25,81 +26,123 @@ TELEGRAM_SESSION  = os.environ.get("TELEGRAM_SESSION", "")
 GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
 
 MAX_MSGS_PER_CHANNEL = 15   # mensajes a revisar por canal por ciclo
-MAX_IMAGES_PER_CYCLE = 25   # máx. llamadas Gemini (límite free: 15 RPM)
-GEMINI_CALL_DELAY    = 4.5  # segundos entre llamadas Gemini (15 RPM = 4s mín)
+MAX_IMAGES_PER_CYCLE = 30   # máx. llamadas Gemini por ciclo (free: 15 RPM)
+VISION_CALL_DELAY    = 4.0  # segundos entre llamadas (free tier: 15 RPM)
+MAX_MSG_AGE_HOURS    = 20   # ignorar mensajes de más de 20 horas
 
-VISION_PROMPT = """Analyze this image from a Telegram trading signal channel.
 
-If this image shows an ACTIVE trade setup with a clear direction and at least one price level, respond EXACTLY in this format:
-SENAL: SI
-INSTRUMENTO: [XAU/BTC/ETH/SOL/NQ/ES/BNB/XRP/ADA/AVAX/DOGE/PEPE/SUI/MATIC/LINK or other symbol visible]
-DIRECCION: LARGO or CORTO
-ENTRADA: [entry price or range like 4710-4706. If only SL/TP visible, use N/A]
-TP: [take profit price, or N/A]
-SL: [stop loss price, or N/A]
-HORIZONTE: SCALP or DIA or SWING
+# ── Gemini Flash ─────────────────────────────────────────────────────────────────
 
-Rules:
-- LARGO = BUY/LONG/COMPRA. CORTO = SELL/SHORT/VENTA.
-- If the chart shows a "TP hit" / "resultado" / closed trade → SENAL: NO
-- If the image is just a chart analysis without a specific trade call → SENAL: NO
-- Only extract prices that are CLEARLY visible as numbers in the image.
+_gemini_model = None
 
-If NOT an actionable signal, respond only:
-SENAL: NO"""
-
-# ── Gemini ─────────────────────────────────────────────────────────────────────
-
-_gemini_client = None
-
-def _get_gemini_client():
-    global _gemini_client
-    if _gemini_client:
-        return _gemini_client
+def _get_gemini_model():
+    global _gemini_model
+    if _gemini_model:
+        return _gemini_model
     if not GEMINI_API_KEY:
         return None
     try:
-        from google import genai
-        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        return _gemini_client
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        return _gemini_model
     except Exception as e:
         print(f"  [VISION] Gemini init error: {e}")
         return None
 
 
-def analyze_image(image_bytes: bytes) -> dict | None:
+def _clean_symbol(raw: str) -> str:
+    s = raw.strip().upper()
+    s = re.split(r'[/\s,]', s)[0]
+    s = re.split(r'[.\-]', s)[0]
+    s = re.sub(r'[^A-Z0-9]', '', s)
+    return s[:12]
+
+
+_EXTRACTION_PROMPT = """\
+You are a professional trading signal analyst. Analyze this image (and any message text provided) from a trading signals channel.
+
+Step 1 — Is there a clear, ACTIVE (not closed) trading signal?
+- Must have a buy/long or sell/short direction
+- Must have at least one specific price level (entry, TP, or SL)
+- If the image shows a CLOSED trade, profit announcement, or past result → answer NO
+
+Step 2 — If YES, extract the signal details in this EXACT format:
+SIGNAL: YES
+DIRECTION: LONG or SHORT
+SYMBOL: single ticker (e.g. BTCUSDT, ETHUSDT, XAUUSD, SOLUSDT, EURUSD)
+ENTRY: entry price number or N/A
+TP: take profit price or N/A
+SL: stop loss price or N/A
+
+If no clear active signal: reply with exactly:
+SIGNAL: NO
+"""
+
+
+def analyze_image(image_bytes: bytes, text_context: str = "") -> dict | None:
     """
-    Envía imagen a Gemini 2.0 Flash y extrae señal de trading.
+    Envía imagen (+ texto opcional del mensaje) a Gemini Flash y extrae señal.
     Devuelve dict con claves INSTRUMENTO/DIRECCION/ENTRADA/TP/SL/HORIZONTE,
     o None si no hay señal clara.
     """
-    client = _get_gemini_client()
-    if not client or not image_bytes:
+    model = _get_gemini_model()
+    if not model or not image_bytes:
         return None
     try:
-        from google import genai
-        from google.genai import types as gtypes
-        img_part = gtypes.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-        resp = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=[VISION_PROMPT, img_part],
-        )
-        raw = resp.text.strip()
+        from PIL import Image
+        import google.generativeai as genai
+
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        prompt_parts = [_EXTRACTION_PROMPT]
+        if text_context and text_context.strip():
+            prompt_parts.append(f"\nMessage text from channel:\n{text_context.strip()[:500]}")
+        prompt_parts.append(img)
+
+        response = model.generate_content(prompt_parts)
+        raw = response.text.strip() if response.text else ""
+
+        if not raw or "SIGNAL: NO" in raw.upper():
+            return None
+
         result = {}
         for line in raw.split("\n"):
             if ":" in line:
                 k, _, v = line.partition(":")
-                result[k.strip()] = v.strip()
+                result[k.strip().upper()] = v.strip()
 
-        if result.get("SENAL", "NO").upper() != "SI":
+        if result.get("SIGNAL", "").upper() != "YES":
             return None
-        if not result.get("INSTRUMENTO") or not result.get("DIRECCION"):
+
+        direction = result.get("DIRECTION", "").upper()
+        instr     = _clean_symbol(result.get("SYMBOL", ""))
+
+        if not instr or len(instr) > 10:
             return None
-        return result
+        if direction not in ("LONG", "SHORT"):
+            return None
+
+        sl = result.get("SL", "N/A")
+        # Rechazar señales sin SL — broker lo requiere
+        if sl == "N/A" or not sl:
+            return None
+
+        return {
+            "SENAL":       "SI",
+            "INSTRUMENTO": instr,
+            "DIRECCION":   "LARGO" if direction == "LONG" else "CORTO",
+            "ENTRADA":     result.get("ENTRY", "N/A"),
+            "TP":          result.get("TP",    "N/A"),
+            "SL":          sl,
+            "HORIZONTE":   "SCALP",
+        }
     except Exception as e:
         err = str(e)
-        if "429" in err or "RESOURCE_EXHAUSTED" in err or "quota" in err.lower():
+        if "429" in err or "quota" in err.lower() or "rate" in err.lower():
             print(f"  [VISION] Gemini rate limit — skip imagen")
+        elif "safety" in err.lower() or "block" in err.lower():
+            pass  # bloqueo de safety filter — skip silencioso
         else:
             print(f"  [VISION] Gemini error: {err[:120]}")
         return None
@@ -133,10 +176,24 @@ async def _fetch_async(channels: dict, limit: int = MAX_MSGS_PER_CHANNEL) -> lis
             print("  [TELETHON] Sesión expirada — ejecuta setup_telegram.py de nuevo")
             return []
 
+        try:
+            await client.get_dialogs(limit=300)
+        except Exception:
+            pass
+
         for name, handle in channels.items():
             try:
-                entity = await client.get_entity(f"@{handle}")
+                if str(handle).startswith("id:"):
+                    entity = await client.get_entity(int(handle[3:]))
+                else:
+                    entity = await client.get_entity(f"@{handle}")
                 async for msg in client.iter_messages(entity, limit=limit):
+                    if msg.date:
+                        msg_ts  = msg.date.replace(tzinfo=timezone.utc) if msg.date.tzinfo is None else msg.date.astimezone(timezone.utc)
+                        age_h   = (datetime.now(timezone.utc) - msg_ts).total_seconds() / 3600
+                        if age_h > MAX_MSG_AGE_HOURS:
+                            continue
+
                     text      = msg.text or msg.message or ""
                     img_bytes = None
                     if msg.photo:
@@ -146,7 +203,7 @@ async def _fetch_async(channels: dict, limit: int = MAX_MSGS_PER_CHANNEL) -> lis
                     if text or img_bytes:
                         results.append((name, handle, text, img_bytes, msg.id))
             except Exception:
-                pass  # canal no disponible — skip silencioso
+                pass
 
     except Exception as e:
         print(f"  [TELETHON] Error conexión: {e}")
@@ -166,7 +223,6 @@ def fetch_channels_with_images(channels: dict) -> list:
     try:
         return asyncio.run(_fetch_async(channels))
     except RuntimeError:
-        # Si ya hay un event loop corriendo (pytest, Jupyter), usar nest_asyncio
         try:
             import nest_asyncio
             nest_asyncio.apply()

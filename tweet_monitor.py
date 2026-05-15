@@ -9,6 +9,7 @@ import re
 import sys
 import json
 import time
+import hashlib
 import feedparser
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,13 +41,18 @@ CONFLUENCED_FILE     = os.path.join(DIR, "confluenced_keys.json")
 
 CHECK_INTERVAL       = 300    # segundos entre ciclos — 5 min para listas grandes
 SEEN_MAX             = 5000
-GROQ_MODEL           = "llama-3.1-8b-instant"
+GROQ_MODEL           = "llama-3.3-70b-versatile"
 GROQ_CALL_DELAY      = 1      # segundos entre llamadas Groq
 FETCH_WORKERS        = 25     # hilos paralelos para fetch de RSS
 TWEETS_PER_ACCOUNT   = 4      # tweets a revisar por cuenta
+MAX_IMAGES_PER_CYCLE = 25     # máx. imágenes Moondream por ciclo
 SIGNAL_WINDOW_HOURS  = 4      # ventana default (fallback)
 MIN_CONFLUENCE       = 2      # mínimo de traders distintos para disparar alerta
 MIN_CONFLUENCE_WEIGHT = 2.5   # suma de pesos (traders buenos valen más)
+
+MIN_RR               = 1.5   # ratio mínimo recompensa:riesgo para ejecutar (TP/SL)
+COPYCAT_THRESHOLD    = 0.65  # similitud Jaccard mínima para marcar señal como copia
+DEAD_HOURS_CRYPTO    = (2, 6)  # UTC — horas de muy bajo volumen en crypto
 
 # Ventana de validez por horizonte — señal scalp de hace 2h ya no sirve
 HORIZONTE_WINDOW = {
@@ -98,6 +104,15 @@ FINANCIAL_STRONG_KEYWORDS = {
 }
 
 # Pre-filtro: señales de trading
+# Mensajes de operaciones YA CERRADAS — filtrar antes de Groq/Vision
+CLOSED_TRADE_KEYWORDS = {
+    "profits locked", "locked in", "closed in profit", "closed in loss",
+    "trade closed", "position closed", "tp hit", "sl hit", "tp reached",
+    "target hit", "target reached", "stopped out", "closed profit",
+    "all targets hit", "all tp hit", "profit taken", "closed @",
+    "resultado:", "operacion cerrada", "cerrado en profit",
+}
+
 SIGNAL_KEYWORDS = {
     "long", "short", "buy", "sell", "entry", "entrada", "target", "tp", "sl",
     "stop", "scalp", "swing", "trade", "signal", "setup", "breakout",
@@ -663,7 +678,156 @@ def get_confluence_key(instrument: str, direction: str, signals: list) -> str:
     handles = "_".join(sorted(s["handle"] for s in signals))
     return f"{instrument}_{direction}_{handles}"
 
-def _fetch_signals_all(signal_accounts: list) -> dict:
+# ── Filtros de calidad: R:R, tendencia, horario, anti-copycat ─────────────────
+
+def _rr_parse(s: str) -> float | None:
+    if not s or s.strip().upper() in ("N/A", ""):
+        return None
+    raw = s.strip().replace(",", "").replace("$", "")
+    if "-" in raw and raw.count("-") == 1 and not raw.startswith("-"):
+        try:
+            a, b = raw.split("-")
+            return (float(a) + float(b)) / 2
+        except Exception:
+            return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _check_rr(entrada: str, tp: str, sl: str) -> tuple[bool, float]:
+    """
+    Calcula si el ratio Recompensa:Riesgo supera MIN_RR.
+    Returns (ok, ratio). ok=True si supera el umbral o no se puede calcular.
+    """
+    en = _rr_parse(entrada)
+    tp_p = _rr_parse(tp)
+    sl_p = _rr_parse(sl)
+    if None in (en, tp_p, sl_p) or en <= 0:
+        return True, 0.0
+    risk   = abs(en - sl_p)
+    reward = abs(tp_p - en)
+    if risk <= 0:
+        return True, 0.0
+    ratio = round(reward / risk, 2)
+    return ratio >= MIN_RR, ratio
+
+
+def _build_trend_cache(price_cache: dict) -> dict:
+    """
+    Devuelve {instrument: 'BULL'|'BEAR'|'NEUTRAL'} basado en MA50 de 4H.
+    Solo para crypto (BTC, ETH, SOL, BNB, XRP) via Binance público.
+    """
+    trends = {}
+    crypto_map = {
+        "BTC": "BTC/USDT", "ETH": "ETH/USDT", "SOL": "SOL/USDT",
+        "BNB": "BNB/USDT", "XRP": "XRP/USDT",
+    }
+    try:
+        import ccxt
+        ex = ccxt.binance({"options": {"defaultType": "spot"}})
+        for inst, sym in crypto_map.items():
+            try:
+                ohlcv = ex.fetch_ohlcv(sym, "4h", limit=55)
+                if len(ohlcv) < 52:
+                    continue
+                closes = [c[4] for c in ohlcv]
+                ma50   = sum(closes[-50:]) / 50
+                curr   = closes[-1]
+                if curr > ma50 * 1.01:
+                    trends[inst] = "BULL"
+                elif curr < ma50 * 0.99:
+                    trends[inst] = "BEAR"
+                else:
+                    trends[inst] = "NEUTRAL"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if trends:
+        summary = " | ".join(f"{k}:{v}" for k, v in trends.items())
+        print(f"  [trend] 4H MA50: {summary}")
+    return trends
+
+
+def _trend_ok(instrument: str, direction: str, trends: dict, horizonte: str) -> bool:
+    """
+    False si la señal va en contra de la tendencia 4H.
+    Solo aplica a SCALP y DIA. SWING/POSICION ignoran el filtro.
+    """
+    if horizonte.upper() in ("SWING", "POSICION"):
+        return True
+    inst  = instrument.upper()
+    trend = trends.get(inst)
+    if not trend or trend == "NEUTRAL":
+        return True
+    if direction.upper() == "LARGO" and trend == "BEAR":
+        return False
+    if direction.upper() == "CORTO" and trend == "BULL":
+        return False
+    return True
+
+
+def _is_dead_hour_crypto(instrument: str, horizonte: str) -> bool:
+    """True si es hora de bajo volumen para crypto (solo aplica a SCALP/DIA)."""
+    if horizonte.upper() in ("SWING", "POSICION"):
+        return False
+    if instrument.upper() in _CLOSED_WEEKEND:
+        return False  # non-crypto ya tiene su propio filtro de sesión
+    hour = datetime.now(timezone.utc).hour
+    return DEAD_HOURS_CRYPTO[0] <= hour < DEAD_HOURS_CRYPTO[1]
+
+
+def _text_jaccard(a: str, b: str) -> float:
+    """Similitud Jaccard entre conjuntos de palabras de dos textos."""
+    wa = set(re.sub(r'[^\w]', ' ', a.lower()).split())
+    wb = set(re.sub(r'[^\w]', ' ', b.lower()).split())
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _dedup_copycat(sigs: list) -> list:
+    """
+    Elimina señales cuyo texto es >COPYCAT_THRESHOLD similar a otro ya contado.
+    Evita que canales que se copian entre sí inflen la confluencia.
+    """
+    kept = []
+    for s in sigs:
+        text_s = s.get("text", "")
+        if any(_text_jaccard(text_s, k.get("text", "")) >= COPYCAT_THRESHOLD for k in kept):
+            print(f"    [anti-copy] @{s['handle']} — texto ~igual a canal ya contado → 1 voto")
+            continue
+        kept.append(s)
+    return kept
+
+
+def _warmup_seen(seen: set) -> None:
+    """
+    On startup: fetch all 1-day Telegram messages and mark them as seen WITHOUT
+    calling Groq. Prevents the first real cycle from re-analyzing historical messages
+    and burning the entire daily token budget.
+    """
+    try:
+        from signals_web import fetch_all_web
+        msgs = fetch_all_web(use_tv=False, use_st=False, use_tg=True, max_age_days=1)
+        count = 0
+        for msg in msgs:
+            handle  = msg.get("_author", "web")
+            content = (msg.get("title") or msg.get("summary") or "")
+            _raw_id = msg.get("id") or msg.get("link") or msg.get("_link") or ""
+            if not _raw_id:
+                _raw_id = f"{handle}_{abs(hash(content[:80])):x}"
+            seen.add(f"sig_{_raw_id}")
+            seen.add("ch_" + hashlib.md5(f"{handle}:{content[:150]}".encode()).hexdigest()[:12])
+            count += 1
+        print(f"  [warmup] {count} mensajes históricos marcados como vistos (sin Groq)")
+    except Exception as e:
+        print(f"  [warmup] Error: {e}")
+
+
+def _fetch_signals_all(signal_accounts: list, max_age_days: float = 1) -> dict:
     """
     Fetches signals from: twitter_api (if cookies) or Nitter RSS, plus web sources
     (Telegram channels, TradingView, StockTwits). Returns {handle: (acc, tweets)}.
@@ -693,7 +857,7 @@ def _fetch_signals_all(signal_accounts: list) -> dict:
     # Also pull Telegram + TradingView + StockTwits (works in GitHub Actions too)
     try:
         from signals_web import fetch_all_web
-        web_msgs = fetch_all_web(use_tv=True, use_st=False, use_tg=True, max_age_days=1)
+        web_msgs = fetch_all_web(use_tv=True, use_st=False, use_tg=True, max_age_days=max_age_days)
         for msg in web_msgs:
             author = msg.get("_author", "web")
             src    = msg.get("_source", "web")
@@ -709,10 +873,43 @@ def _fetch_signals_all(signal_accounts: list) -> dict:
 # Máxima desviación permitida entre entrada extraída y precio actual
 STALE_THRESHOLD = {
     "SCALP":    0.010,   # 1.0%  — señal tiene minutos de vida
-    "DIA":      0.030,   # 3.0%  — señal válida hasta 2h
-    "SWING":    0.070,   # 7.0%  — señal válida hasta 6h
-    "POSICION": 0.150,   # 15.0% — señal válida hasta 12h
+    "DIA":      0.025,   # 2.5%  — señal válida hasta 2h
+    "SWING":    0.060,   # 6.0%  — señal válida hasta 6h
+    "POSICION": 0.120,   # 12.0% — señal válida hasta 12h
 }
+
+# Instrumentos que NO operan 24/7 (cerrados fines de semana y fuera de sesión)
+_CLOSED_WEEKEND = {
+    "XAU","XAUUSD","XAUUSDT","GOLD","GC","ORO","GLD",
+    "XAG","XAGUSD","SILVER","PLATA","SI",
+    "NQ","ES","DAX","NASDAQ","SP500","SPX",
+    "NVDA","AAPL","TSLA","MSFT","META","GOOGL","GOOG",
+    "AMZN","NFLX","AMD","INTC","COIN","MSTR","PLTR",
+    "GME","HOOD","SOFI","RIVN","JPM","BAC",
+}
+
+def _is_market_open(instrument: str) -> bool:
+    """
+    False si el instrumento está en un mercado cerrado ahora mismo.
+    Crypto opera 24/7. Metales/índices/acciones cierran el fin de semana.
+      - CME Globex: cierra viernes ~22:00 UTC, abre domingo ~23:00 UTC
+      - Acciones NYSE/NASDAQ: cerrado sábado y domingo completamente
+    """
+    inst = instrument.upper()
+    if inst not in _CLOSED_WEEKEND:
+        return True   # crypto y otros activos 24/7
+
+    now = datetime.now(timezone.utc)
+    wd  = now.weekday()   # 0=lunes ... 5=sábado, 6=domingo
+
+    if wd == 5:                           # sábado entero — cerrado
+        return False
+    if wd == 6 and now.hour < 23:         # domingo antes de apertura Globex
+        return False
+    if wd == 4 and now.hour >= 22:        # viernes después del cierre Globex
+        return False
+    return True
+
 
 # Instrumentos principales a cachear (público, sin auth)
 _CACHE_SYMBOLS = ["XAU","XAG","BTC","ETH","SOL","BNB","XRP","ADA","AVAX",
@@ -741,15 +938,33 @@ def _build_price_cache() -> dict:
     return cache
 
 
+def _resolve_cache_key(instrument: str, price_cache: dict) -> float | None:
+    """
+    Busca el precio actual normalizando el instrumento.
+    'XAUUSD' → SYMBOL_MAP → 'XAU/USDT:USDT' → base 'XAU' → price_cache['XAU']
+    """
+    inst = instrument.upper()
+    if inst in price_cache:
+        return price_cache[inst]
+    try:
+        from broker import SYMBOL_MAP
+        sym = SYMBOL_MAP.get(inst, "")
+        if sym:
+            base = sym.split("/")[0]   # "XAU/USDT:USDT" → "XAU"
+            if base in price_cache:
+                return price_cache[base]
+    except Exception:
+        pass
+    return None
+
+
 def _is_entry_stale(instrument: str, entrada_str: str, horizonte: str,
                     price_cache: dict) -> str | None:
     """
-    Compara la entrada extraída del tweet con el precio actual.
-    Si la diferencia supera el umbral del horizonte, devuelve el precio actual (string).
-    Si es válida o no se puede verificar, devuelve None.
+    Compara la entrada extraída con el precio actual (normaliza aliases de instrumento).
+    Devuelve el precio actual como string si está obsoleta, None si es válida.
     """
-    inst = instrument.upper()
-    current = price_cache.get(inst)
+    current = _resolve_cache_key(instrument, price_cache)
     if not current:
         return None   # sin datos → no bloqueamos
 
@@ -799,8 +1014,18 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     from stats import load_stats
     trader_stats = load_stats()
 
-    # ── Caché de precios actuales (una sola llamada al exchange por ciclo) ────
+    # ── Caché de precios, tendencias y contexto macro (una llamada por ciclo) ──
     price_cache = _build_price_cache()
+    trend_cache = _build_trend_cache(price_cache)
+    try:
+        from market_context import get_market_context
+        mkt_ctx = get_market_context()
+        _fng = mkt_ctx.get("fng_value", 50)
+        _fr  = mkt_ctx.get("funding_rate")
+        _fr_str = f" | Funding={_fr*100:.3f}%" if _fr is not None else ""
+        print(f"  [ctx] F&G={_fng} ({mkt_ctx.get('fng_label','?')}){_fr_str}")
+    except Exception:
+        mkt_ctx = {"fng_value": 50, "fng_label": "Neutral", "block_longs": False, "block_shorts": False}
 
     fetched = _fetch_signals_all(signal_accounts)
     for handle, (acc, tweets) in fetched.items():
@@ -821,7 +1046,15 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             if not text or len(text) < 15:
                 continue
 
+            # Dedup by content: evita que Telethon y el scraper procesen el mismo mensaje
+            _chash = "ch_" + hashlib.md5(f"{handle}:{text[:150]}".encode()).hexdigest()[:12]
+            if _chash in seen:
+                continue
+            seen.add(_chash)
+
             text_lower = text.lower()
+            if any(kw in text_lower for kw in CLOSED_TRADE_KEYWORDS):
+                continue
             if not any(kw in text_lower for kw in SIGNAL_KEYWORDS):
                 continue
 
@@ -867,6 +1100,11 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                 print(f"    -> entrada {entrada} obsoleta (precio actual: {_stale}) — skip")
                 continue
 
+            # Descartar si el mercado del instrumento está cerrado (fin de semana / fuera de sesión)
+            if not _is_market_open(sig.get("INSTRUMENTO", "")):
+                print(f"    -> {sig.get('INSTRUMENTO','')} — mercado cerrado ahora — skip")
+                continue
+
             print(f"    -> SEÑAL {sig.get('INSTRUMENTO','?')} {sig.get('DIRECCION','?')} entrada={entrada}")
             log_event("SIGNAL", f"@{handle}: {sig.get('INSTRUMENTO','?')} {sig.get('DIRECCION','?')} entrada={entrada}", {
                 "handle": handle, "name": name,
@@ -899,7 +1137,34 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     and sig.get("CONFIANZA_TRADER", "").upper() in ("MEDIA", "ALTA")):
                 wr  = trader_stats.get(handle, {}).get("win_rate", 0)
                 tot = trader_stats.get(handle, {}).get("signals", 0)
-                print(f"    -> STAR trader @{handle} ({wr:.0%} WR, {tot} señales) — ejecutando directamente")
+                _s_instr = sig.get("INSTRUMENTO", "")
+                _s_direc = sig.get("DIRECCION", "")
+                _s_hor   = sig.get("HORIZONTE", "DIA")
+
+                # Gate 1: R:R mínimo
+                _rr_ok, _rr_val = _check_rr(sig.get("ENTRADA","N/A"), sig.get("TP","N/A"), sig.get("SL","N/A"))
+                if not _rr_ok:
+                    print(f"    -> STAR bloqueada: R:R {_rr_val:.2f} < {MIN_RR} (TP/SL insuficiente)")
+                    continue
+
+                # Gate 2: tendencia 4H
+                if not _trend_ok(_s_instr, _s_direc, trend_cache, _s_hor):
+                    print(f"    -> STAR bloqueada: {_s_instr} {_s_direc} contra tendencia 4H ({trend_cache.get(_s_instr,'?')})")
+                    continue
+
+                # Gate 3: hora muerta crypto
+                if _is_dead_hour_crypto(_s_instr, _s_hor):
+                    print(f"    -> STAR bloqueada: hora muerta crypto {datetime.now(timezone.utc).hour}:00 UTC")
+                    continue
+
+                # Gate 4: Fear & Greed + Funding rate
+                from market_context import is_signal_ok_for_context
+                _ctx_ok, _ctx_reason = is_signal_ok_for_context(_s_direc, mkt_ctx)
+                if not _ctx_ok:
+                    print(f"    -> STAR bloqueada: contexto macro — {_ctx_reason}")
+                    continue
+
+                print(f"    -> STAR trader @{handle} ({wr:.0%} WR, {tot} señales) — R:R {_rr_val:.2f} — ejecutando directamente")
                 star_msg = build_star_signal_message(name, handle, sig, trader_stats, link)
                 sent_star = send_telegram(tg_token, tg_chat, star_msg)
                 if sent_star:
@@ -946,100 +1211,271 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     except Exception as _e:
         print(f"  [XSIG] Error: {_e}")
 
-    # ── Análisis de imágenes Telegram (Telethon + Gemini Vision) ──────────────
+    # ── Señales propias: GreenMood (MACD Zero Lag BTC/ETH 24/7) ──────────────
     try:
-        from telegram_vision import fetch_channels_with_images, analyze_image, is_configured, GEMINI_CALL_DELAY
-        if is_configured():
-            from signals_web import TELEGRAM_CHANNELS as _TG_CHANNELS
-            print(f"  [VISION] Descargando imágenes de {len(_TG_CHANNELS)} canales...")
-            vision_msgs = fetch_channels_with_images(_TG_CHANNELS)
-            img_total  = sum(1 for _, _, _, img, _ in vision_msgs if img)
-            print(f"  [VISION] {len(vision_msgs)} mensajes | {img_total} fotos")
-
-            img_analyzed = 0
-            for (ch_name, handle, text, img_bytes, msg_id) in vision_msgs:
-                if not img_bytes:
-                    continue
-                tid = f"tg_img_{handle}_{msg_id}"
-                if tid in seen or img_analyzed >= 25:
-                    continue
-
-                time.sleep(GEMINI_CALL_DELAY)
-                sig = analyze_image(img_bytes)
-                img_analyzed += 1
-
-                if not sig:
-                    continue
-
-                instr = sig.get("INSTRUMENTO", "").upper()
-                # Filtrar instrumentos no soportados en BitGet
-                try:
-                    from broker import SYMBOL_MAP as _SM2
-                    if instr not in _SM2:
-                        print(f"    [VISION] @{handle}: {instr} no en BitGet — skip")
-                        continue
-                except Exception:
-                    pass
-
-                entrada = sig.get("ENTRADA", "N/A")
-                _stale2 = _is_entry_stale(instr, entrada, sig.get("HORIZONTE", "DIA"), price_cache)
-                if _stale2:
-                    print(f"    [VISION] @{handle}: entrada {entrada} obsoleta ({_stale2}) — skip")
-                    continue
-
-                seen.add(tid)
-                direc   = sig.get("DIRECCION", "?")
-                tp_v    = sig.get("TP", "N/A")
-                sl_v    = sig.get("SL", "N/A")
-                hor_v   = sig.get("HORIZONTE", "DIA")
-                dir_str = DIR_SIGNAL.get(direc, direc)
-                print(f"  [VISION] @{handle}: {instr} {direc} entrada={entrada} (imagen)")
-                log_event("SIGNAL", f"@{handle} [imagen]: {instr} {direc} entrada={entrada}", {
-                    "handle": handle, "name": ch_name, "source": "vision",
-                    "instrumento": instr, "direccion": direc,
-                    "entrada": entrada, "tp": tp_v, "sl": sl_v, "horizonte": hor_v,
-                })
-
-                # Enviar foto + datos al chat Telegram inmediatamente
-                _vis_caption = (
-                    f"📸 <b>Señal detectada en imagen</b> · @{handle}\n\n"
-                    f"<b>{instr} {dir_str}</b>\n"
-                    f"<pre>"
-                    f"Entrada  {entrada:>20}\n"
-                    f"TP       {tp_v:>20}\n"
-                    f"SL       {sl_v:>20}"
-                    f"</pre>\n"
-                    f"<i>Extraído por Gemini Vision — entra al buffer de confluencia</i>"
-                )
-                send_telegram_photo_bytes(tg_token, tg_chat, img_bytes, _vis_caption)
-
-                entry = {
-                    "ts":               now_iso,
-                    "id":               tid,
-                    "handle":           handle,
-                    "name":             ch_name,
-                    "link":             f"https://t.me/{handle}",
-                    "img":              "",
-                    "text":             text[:200] if text else "[imagen]",
-                    "INSTRUMENTO":      instr,
-                    "DIRECCION":        direc,
-                    "ENTRADA":          entrada,
-                    "TP":               tp_v,
-                    "SL":               sl_v,
-                    "CONFIANZA_TRADER": "MEDIA",
-                    "HORIZONTE":        hor_v,
-                    "RESUMEN":          f"{instr} {direc} — señal por imagen",
-                }
-                signals_buffer.append(entry)
+        from greenmood_strategy import generate_signals as _gm_gen
+        for _gm in _gm_gen():
+            if _gm["id"] not in seen:
+                seen.add(_gm["id"])
+                signals_buffer.append(_gm)
                 from stats import add_pending_signal
-                add_pending_signal(entry)
+                add_pending_signal(_gm)
+                print(f"  [GREENMOOD] {_gm['INSTRUMENTO']} {_gm['DIRECCION']} @ {_gm['ENTRADA']} | {_gm['RESUMEN']}")
+                log_event("SIGNAL", f"@{_gm['handle']}: {_gm['INSTRUMENTO']} {_gm['DIRECCION']} entrada={_gm['ENTRADA']}", {
+                    "handle": _gm["handle"], "name": _gm["name"],
+                    "instrumento": _gm["INSTRUMENTO"], "direccion": _gm["DIRECCION"],
+                    "entrada": _gm["ENTRADA"], "tp": _gm["TP"], "sl": _gm["SL"],
+                    "horizonte": _gm["HORIZONTE"], "confianza": _gm["CONFIANZA_TRADER"],
+                })
+    except Exception as _e:
+        print(f"  [GREENMOOD] Error: {_e}")
 
-            if img_analyzed:
-                print(f"  [VISION] {img_analyzed} imágenes analizadas | {sum(1 for e in signals_buffer if e.get('id','').startswith('tg_img_'))} señales por imagen en buffer")
+    # ── Mensajes en tiempo real de Telegram (texto + imágenes) ──────────────
+    # El listener permanente drena aquí mensajes publicados desde el último ciclo.
+    # Al ser tiempo real, el precio de entrada siempre coincide con el precio actual.
+    try:
+        from telegram_realtime import get_listener
+        from signals_web import TELEGRAM_CHANNELS as _TG_CHANNELS
+        from telegram_vision import analyze_image, is_configured as _vision_ok, VISION_CALL_DELAY
+        from broker import SYMBOL_MAP as _SM_RT
+
+        _rt = get_listener(_TG_CHANNELS)
+        rt_msgs = _rt.drain()
+
+        if rt_msgs:
+            print(f"  [RT] {len(rt_msgs)} mensajes nuevos de Telegram ({_rt.n_chats} canales)")
         else:
-            print("  [VISION] No configurado (falta TELEGRAM_SESSION o GEMINI_API_KEY)")
+            print(f"  [RT] Sin mensajes nuevos ({_rt.n_chats} canales escuchando)")
+
+        img_analyzed_rt = 0
+
+        for (ch_name, rt_handle, text, img_bytes, msg_id, _msg_ts) in rt_msgs:
+            clean_handle = rt_handle.lstrip("@")
+
+            # ── Texto: misma pipeline que señales normales ────────────────────
+            if text and len(text) >= 15:
+                _chash = "ch_" + hashlib.md5(f"{clean_handle}:{text[:150]}".encode()).hexdigest()[:12]
+                if _chash not in seen:
+                    seen.add(_chash)
+                    _tl = text.lower()
+                    _has_dir = any(kw in _tl for kw in {
+                        "long","short","buy","sell","largo","corto","compra","venta",
+                        "entry","entrada","signal","señal","trade now","open",
+                    })
+                    _has_num = bool(re.search(r'\b\d{2,6}(?:[.,]\d+)?\b', text))
+                    if (not any(kw in _tl for kw in CLOSED_TRADE_KEYWORDS)
+                            and any(kw in _tl for kw in SIGNAL_KEYWORDS) and _has_dir and _has_num):
+                        print(f"  [RT-TXT] @{clean_handle}: {text[:60]}...")
+                        time.sleep(GROQ_CALL_DELAY)
+                        _rt_sig = extract_signal(text, ch_name, clean_handle, client)
+                        if _rt_sig and _rt_sig.get("SENAL", "NO").upper() == "SI":
+                            _rt_entrada = _rt_sig.get("ENTRADA", "N/A").strip()
+                            if re.search(r'\d', _rt_entrada):
+                                _rt_instr = _rt_sig.get("INSTRUMENTO", "").upper()
+                                if _rt_instr in _SM_RT and _is_market_open(_rt_instr):
+                                    _rt_stale = _is_entry_stale(_rt_instr, _rt_entrada,
+                                                                _rt_sig.get("HORIZONTE","DIA"), price_cache)
+                                    if not _rt_stale:
+                                        _rt_tid = f"sig_rt_{clean_handle}_{msg_id}"
+                                        seen.add(_rt_tid)
+                                        _rt_entry = {
+                                            "ts":               now_iso,
+                                            "id":               _rt_tid,
+                                            "handle":           clean_handle,
+                                            "name":             ch_name,
+                                            "link":             f"https://t.me/{clean_handle}/{msg_id}",
+                                            "img":              "",
+                                            "text":             text[:300],
+                                            **{k: _rt_sig.get(k,"") for k in
+                                               ["INSTRUMENTO","DIRECCION","ENTRADA","TP","SL",
+                                                "CONFIANZA_TRADER","HORIZONTE","RESUMEN"]},
+                                        }
+                                        signals_buffer.append(_rt_entry)
+                                        from stats import add_pending_signal
+                                        add_pending_signal(_rt_entry)
+                                        print(f"    -> [RT] SEÑAL {_rt_instr} {_rt_sig.get('DIRECCION','?')} entrada={_rt_entrada}")
+                                        log_event("SIGNAL", f"@{clean_handle} [RT]: {_rt_instr} {_rt_sig.get('DIRECCION','?')} entrada={_rt_entrada}", {
+                                            "handle": clean_handle, "name": ch_name, "source": "telegram_rt",
+                                            "instrumento": _rt_instr, "direccion": _rt_sig.get("DIRECCION",""),
+                                            "entrada": _rt_entrada, "tp": _rt_sig.get("TP",""),
+                                            "sl": _rt_sig.get("SL",""), "horizonte": _rt_sig.get("HORIZONTE",""),
+                                        })
+                                    else:
+                                        print(f"    -> [RT] entrada {_rt_entrada} obsoleta ({_rt_stale}) — skip")
+                                else:
+                                    print(f"    -> [RT] {_rt_instr} no soportado o mercado cerrado — skip")
+
+            # ── Imagen: Gemini Flash Vision ───────────────────────────────────
+            _txt_closed = text and any(kw in text.lower() for kw in CLOSED_TRADE_KEYWORDS)
+            if img_bytes and _vision_ok() and img_analyzed_rt < MAX_IMAGES_PER_CYCLE and not _txt_closed:
+                tid = f"tg_img_{clean_handle}_{msg_id}"
+                if tid not in seen:
+                    time.sleep(VISION_CALL_DELAY)
+                    _vis_sig = analyze_image(img_bytes, text_context=text or "")
+                    img_analyzed_rt += 1
+
+                    if _vis_sig:
+                        _v_instr = _vis_sig.get("INSTRUMENTO", "").upper()
+                        if _v_instr not in _SM_RT:
+                            print(f"    [VISION] @{clean_handle}: {_v_instr} no en BitGet — skip")
+                        elif not _is_market_open(_v_instr):
+                            print(f"    [VISION] @{clean_handle}: {_v_instr} — mercado cerrado — skip")
+                        else:
+                            _v_entrada = _vis_sig.get("ENTRADA", "N/A")
+                            _v_stale   = _is_entry_stale(_v_instr, _v_entrada,
+                                                         _vis_sig.get("HORIZONTE","DIA"), price_cache)
+                            if _v_stale:
+                                print(f"    [VISION] @{clean_handle}: entrada {_v_entrada} obsoleta ({_v_stale}) — skip")
+                            else:
+                                seen.add(tid)
+                                _v_direc  = _vis_sig.get("DIRECCION", "?")
+                                _v_tp     = _vis_sig.get("TP", "N/A")
+                                _v_sl     = _vis_sig.get("SL", "N/A")
+                                _v_hor    = _vis_sig.get("HORIZONTE", "DIA")
+                                _v_dirstr = DIR_SIGNAL.get(_v_direc, _v_direc)
+                                print(f"  [VISION] @{clean_handle}: {_v_instr} {_v_direc} entrada={_v_entrada} (imagen)")
+                                log_event("SIGNAL", f"@{clean_handle} [imagen RT]: {_v_instr} {_v_direc} entrada={_v_entrada}", {
+                                    "handle": clean_handle, "name": ch_name, "source": "vision_rt",
+                                    "instrumento": _v_instr, "direccion": _v_direc,
+                                    "entrada": _v_entrada, "tp": _v_tp, "sl": _v_sl, "horizonte": _v_hor,
+                                })
+                                _vis_cap = (
+                                    f"📸 <b>Señal detectada en imagen</b> · @{clean_handle}\n\n"
+                                    f"<b>{_v_instr} {_v_dirstr}</b>\n"
+                                    f"<pre>"
+                                    f"Entrada  {_v_entrada:>20}\n"
+                                    f"TP       {_v_tp:>20}\n"
+                                    f"SL       {_v_sl:>20}"
+                                    f"</pre>\n"
+                                    f"<i>Extraído por Gemini Flash Vision</i>"
+                                )
+                                send_telegram_photo_bytes(tg_token, tg_chat, img_bytes, _vis_cap)
+                                _vis_entry = {
+                                    "ts": now_iso, "id": tid,
+                                    "handle": clean_handle, "name": ch_name,
+                                    "link": f"https://t.me/{clean_handle}/{msg_id}",
+                                    "img": "", "text": text[:200] if text else "[imagen]",
+                                    "INSTRUMENTO": _v_instr, "DIRECCION": _v_direc,
+                                    "ENTRADA": _v_entrada, "TP": _v_tp, "SL": _v_sl,
+                                    "CONFIANZA_TRADER": "MEDIA", "HORIZONTE": _v_hor,
+                                    "RESUMEN": f"{_v_instr} {_v_direc} — señal por imagen",
+                                }
+                                signals_buffer.append(_vis_entry)
+                                from stats import add_pending_signal
+                                add_pending_signal(_vis_entry)
+
+        if img_analyzed_rt:
+            print(f"  [VISION] {img_analyzed_rt} imágenes analizadas en tiempo real")
+
     except Exception as _ve:
-        print(f"  [VISION] Error: {_ve}")
+        print(f"  [RT] Error: {_ve}")
+
+    # ── CPI Straddle — bracket de stops antes del dato macro ─────────────────
+    try:
+        from cpi_strategy import build_straddle, is_straddle_window, minutes_to_next_cpi
+        _in_win, _cpi_dt = is_straddle_window()
+        if _in_win:
+            _cpi_sigs = build_straddle(price_cache)
+            _new_cpi  = [s for s in _cpi_sigs if s["id"] not in seen]
+            if _new_cpi:
+                _mins = int(minutes_to_next_cpi() or 0)
+                _btc_price = price_cache.get("BTC", 0)
+                _buy_stop  = _new_cpi[0]["ENTRADA"] if _new_cpi[0]["DIRECCION"] == "LARGO" else _new_cpi[1]["ENTRADA"]
+                _sell_stop = _new_cpi[0]["ENTRADA"] if _new_cpi[0]["DIRECCION"] == "CORTO" else _new_cpi[1]["ENTRADA"]
+                _tp_long   = _new_cpi[0]["TP"]      if _new_cpi[0]["DIRECCION"] == "LARGO" else _new_cpi[1]["TP"]
+                _tp_short  = _new_cpi[0]["TP"]      if _new_cpi[0]["DIRECCION"] == "CORTO" else _new_cpi[1]["TP"]
+                _cpi_alert = (
+                    f"📊 <b>CPI STRADDLE BTC</b> — {_cpi_dt.strftime('%H:%M UTC')} en ~{_mins} min\n\n"
+                    f"Referencia: <code>{_btc_price:,.2f}</code>\n\n"
+                    f"<pre>"
+                    f"🟢 LARGO  stop  {_buy_stop:>14}\n"
+                    f"         TP    {_tp_long:>14}\n"
+                    f"         SL    {_sell_stop:>14}\n\n"
+                    f"🔴 CORTO  stop  {_sell_stop:>14}\n"
+                    f"         TP    {_tp_short:>14}\n"
+                    f"         SL    {_buy_stop:>14}"
+                    f"</pre>\n"
+                    f"<i>Entra en la dirección que rompa primero · WR 33% · R:R 2:1</i>"
+                )
+                send_telegram(tg_token, tg_chat, _cpi_alert)
+                for _cs in _new_cpi:
+                    seen.add(_cs["id"])
+                    print(f"  [CPI] BTC {_cs['DIRECCION']} stop @ {_cs['ENTRADA']} | TP {_cs['TP']} | SL {_cs['SL']}")
+                    from broker import execute_signal as _exec_cpi
+                    _cpi_status = _exec_cpi(
+                        instrument=_cs["INSTRUMENTO"],
+                        direction =_cs["DIRECCION"],
+                        entrada   =_cs["ENTRADA"],
+                        tp        =_cs["TP"],
+                        sl        =_cs["SL"],
+                        calidad   ="ALTA",
+                        horizonte ="SCALP",
+                        fuente    ="cpi_straddle",
+                    )
+                    print(f"    -> [CPI] {_cpi_status}")
+                    alerts += 1
+                send_telegram(tg_token, tg_chat,
+                    f"🤖 <b>CPI Broker:</b> <code>Straddle BTC colocado (2 patas paper)</code>")
+                log_event("CPI", f"Straddle BTC colocado — {_cpi_dt.strftime('%Y-%m-%d %H:%M UTC')}", {
+                    "buy_stop": _buy_stop, "sell_stop": _sell_stop,
+                    "tp_long": _tp_long, "tp_short": _tp_short,
+                    "btc_ref": _btc_price, "mins_to_cpi": _mins,
+                })
+    except Exception as _cpi_err:
+        print(f"  [CPI] Error: {_cpi_err}")
+
+    # ── FOMC Straddle — igual estructura que CPI ──────────────────────────────
+    try:
+        from fomc_strategy import build_straddle as _fomc_build, is_straddle_window as _fomc_win, minutes_to_next_fomc
+        _fomc_in_win, _fomc_dt = _fomc_win()
+        if _fomc_in_win:
+            _fomc_sigs = _fomc_build(price_cache)
+            _new_fomc  = [s for s in _fomc_sigs if s["id"] not in seen]
+            if _new_fomc:
+                _fmins     = int(minutes_to_next_fomc() or 0)
+                _fbtc      = price_cache.get("BTC", 0)
+                _f_buy     = next((s["ENTRADA"] for s in _new_fomc if s["DIRECCION"] == "LARGO"), "?")
+                _f_sell    = next((s["ENTRADA"] for s in _new_fomc if s["DIRECCION"] == "CORTO"), "?")
+                _f_tp_long = next((s["TP"]      for s in _new_fomc if s["DIRECCION"] == "LARGO"), "?")
+                _f_tp_shor = next((s["TP"]      for s in _new_fomc if s["DIRECCION"] == "CORTO"), "?")
+                _fomc_alert = (
+                    f"🏛 <b>FOMC STRADDLE BTC</b> — {_fomc_dt.strftime('%H:%M UTC')} en ~{_fmins} min\n\n"
+                    f"Referencia: <code>{_fbtc:,.2f}</code>\n\n"
+                    f"<pre>"
+                    f"🟢 LARGO  stop  {_f_buy:>14}\n"
+                    f"         TP    {_f_tp_long:>14}\n"
+                    f"         SL    {_f_sell:>14}\n\n"
+                    f"🔴 CORTO  stop  {_f_sell:>14}\n"
+                    f"         TP    {_f_tp_shor:>14}\n"
+                    f"         SL    {_f_buy:>14}"
+                    f"</pre>\n"
+                    f"<i>Entra en la dirección que rompa primero · WR 46% · PnL +0.508%/trade · R:R 2:1</i>"
+                )
+                send_telegram(tg_token, tg_chat, _fomc_alert)
+                for _fs in _new_fomc:
+                    seen.add(_fs["id"])
+                    print(f"  [FOMC] BTC {_fs['DIRECCION']} stop @ {_fs['ENTRADA']} | TP {_fs['TP']} | SL {_fs['SL']}")
+                    from broker import execute_signal as _exec_fomc
+                    _fomc_status = _exec_fomc(
+                        instrument=_fs["INSTRUMENTO"],
+                        direction =_fs["DIRECCION"],
+                        entrada   =_fs["ENTRADA"],
+                        tp        =_fs["TP"],
+                        sl        =_fs["SL"],
+                        calidad   ="ALTA",
+                        horizonte ="SCALP",
+                        fuente    ="fomc_straddle",
+                    )
+                    print(f"    -> [FOMC] {_fomc_status}")
+                    alerts += 1
+                send_telegram(tg_token, tg_chat,
+                    f"🤖 <b>FOMC Broker:</b> <code>Straddle BTC colocado (2 patas paper)</code>")
+                log_event("FOMC", f"Straddle BTC colocado — {_fomc_dt.strftime('%Y-%m-%d %H:%M UTC')}", {
+                    "buy_stop": _f_buy, "sell_stop": _f_sell,
+                    "tp_long": _f_tp_long, "btc_ref": _fbtc, "mins_to_fomc": _fmins,
+                })
+    except Exception as _fomc_err:
+        print(f"  [FOMC] Error: {_fomc_err}")
 
     # Detectar confluencia por instrumento + dirección
     groups = defaultdict(list)
@@ -1055,6 +1491,16 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
         for s in sorted(sigs, key=lambda x: x["ts"]):
             latest_per_handle[s["handle"]] = s
         unique_sigs = list(latest_per_handle.values())
+
+        # Eliminar canales con historial sistemáticamente malo (WR < 38% con ≥20 señales)
+        from stats import is_channel_blacklisted
+        _before = len(unique_sigs)
+        unique_sigs = [s for s in unique_sigs if not is_channel_blacklisted(s["handle"], trader_stats)]
+        if len(unique_sigs) < _before:
+            print(f"    [blacklist] {_before - len(unique_sigs)} canal(es) excluidos por mal WR histórico")
+
+        # Anti-copycat: canales que copian el mismo texto cuentan como 1 fuente
+        unique_sigs = _dedup_copycat(unique_sigs)
 
         # Ponderacion por win rate — traders con buen historial pesan más
         weighted_score = sum(_trader_weight(s["handle"], trader_stats) for s in unique_sigs)
@@ -1104,24 +1550,66 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
             horizontes = [s.get("HORIZONTE", "DIA").upper() for s in unique_sigs]
             horizonte  = max(set(horizontes), key=horizontes.count)
 
-            # Ejecutar orden en broker
-            from broker import execute_signal
-            broker_status = execute_signal(
-                instrument = ev.get("INSTRUMENTO", instrument),
-                direction  = ev.get("DIRECCION",  direction),
-                entrada    = ev.get("ENTRADA",    "N/A"),
-                tp         = ev.get("TP",         "N/A"),
-                sl         = ev.get("SL",         "N/A"),
-                calidad    = ev.get("CALIDAD",    "MEDIA"),
-                horizonte  = horizonte,
-            )
-            print(f"    -> BROKER: {broker_status}")
-            log_event("BROKER", f"Confluencia {instrument} {direction}: {broker_status[:80]}", {
-                "instrument": instrument, "direction": direction,
-                "horizonte": horizonte, "status": broker_status,
-            })
-            send_telegram(tg_token, tg_chat,
-                f"🤖 <b>Broker:</b> <code>{broker_status}</code>")
+            _c_instr  = ev.get("INSTRUMENTO", instrument)
+            _c_direc  = ev.get("DIRECCION",   direction)
+            _c_entrada= ev.get("ENTRADA",      "N/A")
+            _c_tp     = ev.get("TP",           "N/A")
+            _c_sl     = ev.get("SL",           "N/A")
+
+            # Gate 1: R:R mínimo
+            _rr_ok, _rr_val = _check_rr(_c_entrada, _c_tp, _c_sl)
+            if not _rr_ok:
+                print(f"    -> Confluencia bloqueada: R:R {_rr_val:.2f} < {MIN_RR} — alerta enviada sin ejecutar")
+                send_telegram(tg_token, tg_chat,
+                    f"⚠️ <b>Confluencia SIN ejecutar</b> — R:R {_rr_val:.2f} insuficiente (mín {MIN_RR})\n"
+                    f"<i>Señal informativa: {_c_instr} {_c_direc}</i>")
+            # Gate 2: tendencia 4H
+            elif not _trend_ok(_c_instr, _c_direc, trend_cache, horizonte):
+                _tr = trend_cache.get(_c_instr, "?")
+                print(f"    -> Confluencia bloqueada: {_c_instr} {_c_direc} contra tendencia 4H ({_tr})")
+                send_telegram(tg_token, tg_chat,
+                    f"⚠️ <b>Confluencia SIN ejecutar</b> — {_c_instr} {_c_direc} va contra tendencia 4H ({_tr})\n"
+                    f"<i>Señal informativa únicamente</i>")
+            # Gate 3: hora muerta crypto
+            elif _is_dead_hour_crypto(_c_instr, horizonte):
+                _hr = datetime.now(timezone.utc).hour
+                print(f"    -> Confluencia bloqueada: hora muerta crypto {_hr}:00 UTC")
+                send_telegram(tg_token, tg_chat,
+                    f"⚠️ <b>Confluencia SIN ejecutar</b> — hora de bajo volumen ({_hr}:00 UTC)\n"
+                    f"<i>Señal informativa: {_c_instr} {_c_direc}</i>")
+            else:
+                # Gate 4: Fear & Greed + Funding rate
+                from market_context import is_signal_ok_for_context
+                _ctx_ok, _ctx_reason = is_signal_ok_for_context(_c_direc, mkt_ctx)
+                if not _ctx_ok:
+                    print(f"    -> Confluencia bloqueada: contexto macro — {_ctx_reason}")
+                    send_telegram(tg_token, tg_chat,
+                        f"⚠️ <b>Confluencia SIN ejecutar</b> — contexto macro desfavorable\n"
+                        f"<i>{_ctx_reason} · {_c_instr} {_c_direc}</i>")
+                else:
+                    print(f"    -> Gates OK: R:R {_rr_val:.2f} | tendencia OK | horario OK | F&G OK — ejecutando")
+
+            # Ejecutar orden en broker (solo si pasó todos los gates)
+            from market_context import is_signal_ok_for_context as _ctx_check
+            _ctx_pass, _ = _ctx_check(_c_direc, mkt_ctx)
+            if _rr_ok and _trend_ok(_c_instr, _c_direc, trend_cache, horizonte) and not _is_dead_hour_crypto(_c_instr, horizonte) and _ctx_pass:
+                from broker import execute_signal
+                broker_status = execute_signal(
+                    instrument = _c_instr,
+                    direction  = _c_direc,
+                    entrada    = _c_entrada,
+                    tp         = _c_tp,
+                    sl         = _c_sl,
+                    calidad    = ev.get("CALIDAD", "MEDIA"),
+                    horizonte  = horizonte,
+                )
+                print(f"    -> BROKER: {broker_status}")
+                log_event("BROKER", f"Confluencia {instrument} {direction}: {broker_status[:80]}", {
+                    "instrument": instrument, "direction": direction,
+                    "horizonte": horizonte, "status": broker_status,
+                })
+                send_telegram(tg_token, tg_chat,
+                    f"🤖 <b>Broker:</b> <code>{broker_status}</code>")
 
     return alerts
 
@@ -1263,6 +1751,18 @@ def main():
     confluenced_keys = load_confluenced()
     insider_seen    = load_insider_seen()
 
+    # Arrancar listener real-time de Telegram (background thread)
+    try:
+        from telegram_realtime import get_listener
+        from signals_web import TELEGRAM_CHANNELS as _TG_CH
+        _rt = get_listener(_TG_CH)
+        if loop_mode:
+            print(f"  Conectando listener Telegram real-time...")
+            _rt.wait_ready(timeout=45)
+            print(f"  [RT] Escuchando {_rt.n_chats} canales de Telegram")
+    except Exception as _e:
+        print(f"  [RT] No se pudo arrancar listener: {_e}")
+
     if loop_mode:
         send_telegram(tg_token, tg_chat,
             f"🚀 Monitor arrancado — {len(accounts)} noticias + {len(signal_accounts)} traders\n"
@@ -1274,6 +1774,8 @@ def main():
             "interval": CHECK_INTERVAL, "workers": FETCH_WORKERS,
         })
         print(f"=== Modo continuo | {len(accounts)} noticias + {len(signal_accounts)} señales | cada {CHECK_INTERVAL}s | {FETCH_WORKERS} workers ===")
+        _warmup_seen(seen)
+        save_seen(seen)
         cycle        = 0
         alerts_today = 0
         while True:

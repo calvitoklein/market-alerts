@@ -172,7 +172,11 @@ def _parse_price(s: str):
         return None
 
 def evaluate_signal(signal: dict) -> str:
-    """Devuelve WIN, LOSS o NEUTRAL."""
+    """
+    Devuelve WIN, LOSS o NEUTRAL.
+    Si ambos TP y SL se tocaron en la ventana, usa la magnitud del movimiento
+    para estimar cuál llegó primero (más conservador que asumir siempre WIN).
+    """
     instrument = signal.get("INSTRUMENTO", "").upper()
     direction  = signal.get("DIRECCION", "").upper()
     ts         = datetime.fromisoformat(signal["ts"])
@@ -187,15 +191,48 @@ def evaluate_signal(signal: dict) -> str:
     high, low, current = rng
 
     if direction == "LARGO":
-        if tp and high >= tp:   return "WIN"
-        if sl and low  <= sl:   return "LOSS"
-        if entry:               return "WIN" if current > entry * 1.002 else "LOSS"
+        hit_tp = bool(tp and high >= tp)
+        hit_sl = bool(sl and low  <= sl)
+        if hit_tp and hit_sl:
+            # Ambos tocados — estima qué llegó primero por magnitud
+            # Si el recorrido al TP (desde entrada) es menor que al SL, más probable que TP llegó antes
+            if entry:
+                dist_tp = abs(tp - entry)
+                dist_sl = abs(sl - entry)
+                return "WIN" if dist_tp <= dist_sl else "LOSS"
+            return "NEUTRAL"
+        if hit_tp:    return "WIN"
+        if hit_sl:    return "LOSS"
+        if entry:     return "WIN" if current > entry * 1.002 else "LOSS"
+
     elif direction == "CORTO":
-        if tp and low  <= tp:   return "WIN"
-        if sl and high >= sl:   return "LOSS"
-        if entry:               return "WIN" if current < entry * 0.998 else "LOSS"
+        hit_tp = bool(tp and low  <= tp)
+        hit_sl = bool(sl and high >= sl)
+        if hit_tp and hit_sl:
+            if entry:
+                dist_tp = abs(tp - entry)
+                dist_sl = abs(sl - entry)
+                return "WIN" if dist_tp <= dist_sl else "LOSS"
+            return "NEUTRAL"
+        if hit_tp:    return "WIN"
+        if hit_sl:    return "LOSS"
+        if entry:     return "WIN" if current < entry * 0.998 else "LOSS"
 
     return "NEUTRAL"
+
+# ── Blacklist automática por mal historial ────────────────────────────────────
+
+BLACKLIST_MIN_SIGNALS = 20   # mínimo de señales para considerar blacklist
+BLACKLIST_MAX_WR      = 0.38  # WR por debajo de este umbral → blacklisted
+
+def is_channel_blacklisted(handle: str, stats: dict) -> bool:
+    """True si el canal tiene historial suficiente y WR sistemáticamente malo."""
+    s = stats.get(handle, {})
+    evaluated = s.get("wins", 0) + s.get("losses", 0)
+    if evaluated < BLACKLIST_MIN_SIGNALS:
+        return False
+    return s.get("win_rate", 1.0) < BLACKLIST_MAX_WR
+
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 

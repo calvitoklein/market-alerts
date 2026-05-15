@@ -7,6 +7,7 @@ Conceptos   : Market Structure (HH/HL, LH/LL) + FVG + Order Block
 """
 
 import os
+import json
 import hashlib
 from datetime import datetime, timezone
 
@@ -20,16 +21,19 @@ INSTR  = "XAU"
 SESSIONS = [(7, 0, 10, 0), (13, 30, 16, 30)]
 
 # Gestión de riesgo
-SL_BUFFER   = 0.80   # USD de margen extra bajo/sobre la zona para el SL
+SL_BUFFER   = 1.50   # USD de margen extra (backtest: 0.80 generaba sobretrading)
 RR_RATIO    = 2.5    # Risk:Reward objetivo
-MIN_SL_DIST = 1.5    # SL mínimo en USD desde la entrada
-MAX_SL_DIST = 12.0   # SL máximo en USD desde la entrada
-ZONE_TOL    = 0.5    # USD de tolerancia para considerar precio "en la zona"
+MIN_SL_DIST = 3.0    # SL mínimo en USD — solo zonas con amplitud suficiente
+MAX_SL_DIST = 10.0   # SL máximo en USD
+ZONE_TOL    = 0.3    # USD de tolerancia — más preciso
 
 # Lookbacks
 TREND_BARS  = 50     # velas 15m para estructura
 ENTRY_BARS  = 25     # velas 5m para OB/FVG
 SWING_WIN   = 4      # ventana de velas a cada lado para swing H/L
+
+
+SESSION_LOG = os.path.join(DIR, "xsignals_sessions.json")
 
 
 # ── Sesión ────────────────────────────────────────────────────────────────────
@@ -38,6 +42,37 @@ def _in_session(dt: datetime = None) -> bool:
     dt  = dt or datetime.now(timezone.utc)
     tm  = dt.hour * 60 + dt.minute
     return any(sh * 60 + sm <= tm < eh * 60 + em for sh, sm, eh, em in SESSIONS)
+
+
+def _session_key(now: datetime) -> str:
+    tag = "L" if now.hour < 12 else "NY"
+    return f"{now.strftime('%Y%m%d')}_{tag}"
+
+
+def _session_already_fired(key: str) -> bool:
+    try:
+        if os.path.exists(SESSION_LOG):
+            with open(SESSION_LOG) as f:
+                return key in json.load(f).get("fired", [])
+    except Exception:
+        pass
+    return False
+
+
+def _mark_session_fired(key: str):
+    try:
+        data = {"fired": []}
+        if os.path.exists(SESSION_LOG):
+            with open(SESSION_LOG) as f:
+                data = json.load(f)
+        fired = data.get("fired", [])
+        if key not in fired:
+            fired.append(key)
+        data["fired"] = fired[-20:]   # keep last 20 entries
+        with open(SESSION_LOG, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 
 # ── Exchange ──────────────────────────────────────────────────────────────────
@@ -183,6 +218,10 @@ def generate_signals() -> list:
     if not _in_session(now):
         return []
 
+    sess = _session_key(now)
+    if _session_already_fired(sess):
+        return []
+
     ex = _get_exchange()
     if not ex:
         return []
@@ -248,6 +287,8 @@ def generate_signals() -> list:
     sig_id = "xsig_" + hashlib.md5(
         f"{direction}_{active['mid']:.2f}_{now.strftime('%Y%m%d%H')}".encode()
     ).hexdigest()[:12]
+
+    _mark_session_fired(sess)
 
     return [{
         "ts":               now.isoformat(),

@@ -6,4 +6,5 @@ yfinance>=0.2.40
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 telethon>=1.36.0
-google-generativeai>=0.8.0
+google-generativeai>=0.7.0
+Pillow>=10.0.0

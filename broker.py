@@ -13,6 +13,8 @@ import os
 import re
 import csv
 import json
+import math
+import statistics
 from datetime import datetime, timezone
 
 # Cargar .env si existe
@@ -110,9 +112,15 @@ SYMBOL_MAP = {
     "TAO": _u("TAO"),
     "FET": _u("FET"),
     "RNDR": _u("RNDR"), "RENDER": _u("RNDR"),
+    "RENDER/USDT": _u("RNDR"), "RENDER USDT": _u("RNDR"), "RENDER/USDT:USDT": _u("RNDR"),
     "WLD": _u("WLD"),
     "AGIX": _u("AGIX"),
     "OCEAN": _u("OCEAN"),
+    "AIXBT": _u("AIXBT"), "AIXBTUSD": _u("AIXBT"), "AIXBTUSDT": _u("AIXBT"),
+    "ETHFI": _u("ETHFI"), "ETHFIUSD": _u("ETHFI"), "ETHFIUSDT": _u("ETHFI"),
+    "VIRTUAL": _u("VIRTUAL"), "VIRTUALS": _u("VIRTUAL"),
+    "KAITO": _u("KAITO"),
+    "MORPHO": _u("MORPHO"),
 
     # ── Memecoins ─────────────────────────────────────────────────────────────
     "DOGE": _u("DOGE"), "DOGECOIN": _u("DOGE"),
@@ -145,6 +153,7 @@ SYMBOL_MAP = {
     "XAU": _u("XAU"), "GOLD": _u("XAU"), "GC": _u("XAU"),
     "ORO": _u("XAU"), "XAUUSD": _u("XAU"), "XAUUSDT": _u("XAU"),
     "GLD": _u("XAU"), "XAUUSD:USDT": _u("XAU"),
+    "XAUUSDM": _u("XAU"), "XAUUSDPRO": _u("XAU"),  # variantes broker MT4/MT5
 
     # ── Silver (Plata) — XAGUSDT en BitGet ────────────────────────────────────
     "XAG": _u("XAG"), "SILVER": _u("XAG"), "PLATA": _u("XAG"),
@@ -247,19 +256,22 @@ def has_open_position(instrument: str) -> bool:
     return instrument.upper() in _load_open_positions()
 
 def _record_open_position(instrument, symbol, direction, entry, tp, sl,
-                           tamanio, leverage, horizonte, order_id):
+                           tamanio, leverage, horizonte, order_id,
+                           pos_key: str = ""):
     positions = _load_open_positions()
-    positions[instrument.upper()] = {
-        "symbol":    symbol,
-        "direction": direction,
-        "entry":     entry,
-        "tp":        tp,
-        "sl":        sl,
-        "tamanio":   tamanio,
-        "leverage":  leverage,
-        "horizonte": horizonte,
-        "order_id":  order_id,
-        "opened_at": datetime.now(timezone.utc).isoformat(),
+    key = (pos_key or instrument).upper()
+    positions[key] = {
+        "symbol":          symbol,
+        "direction":       direction,
+        "entry":           entry,
+        "tp":              tp,
+        "sl":              sl,
+        "tamanio":         tamanio,
+        "leverage":        leverage,
+        "horizonte":       horizonte,
+        "order_id":        order_id,
+        "instrument_base": instrument.upper(),   # para SYMBOL_MAP lookup
+        "opened_at":       datetime.now(timezone.utc).isoformat(),
     }
     _save_open_positions(positions)
 
@@ -276,13 +288,17 @@ def check_position_exits() -> list:
     closed = []
     still_open = {}
 
-    for instrument, pos in positions.items():
+    cancelled_oco = set()   # claves de patas OCO a cancelar
+
+    for pos_key, pos in positions.items():
+        # Usar instrument_base para SYMBOL_MAP (CPI straddle usa clave compuesta)
+        instrument = pos.get("instrument_base", pos_key).upper()
+
         try:
             import ccxt
-            # Precio actual — crypto via Binance público, resto via BitGet público
             sym = SYMBOL_MAP.get(instrument)
             if not sym:
-                still_open[instrument] = pos
+                still_open[pos_key] = pos
                 continue
             if instrument in ("BTC", "ETH"):
                 ex   = ccxt.binance({"options": {"defaultType": "spot"}})
@@ -310,7 +326,7 @@ def check_position_exits() -> list:
                 if direc == "CORTO":
                     pnl_pct = -pnl_pct
                 closed.append({
-                    "instrument": instrument,
+                    "instrument": pos_key,
                     "direction":  direc,
                     "entry":      entry,
                     "exit_price": price,
@@ -319,7 +335,7 @@ def check_position_exits() -> list:
                     "horizonte":  pos.get("horizonte", "?"),
                 })
                 log_position(
-                    fuente="cierre_auto", instrumento=instrument,
+                    fuente="cierre_auto", instrumento=pos_key,
                     simbolo=pos.get("symbol", instrument),
                     direccion=direc, entrada=entry, tp=tp, sl=sl,
                     tamanio=pos.get("tamanio", 0),
@@ -329,11 +345,28 @@ def check_position_exits() -> list:
                     order_id=pos.get("order_id", ""),
                     estado=f"{hit} @ {price:.2f} | PnL: {pnl_pct:+.2f}%",
                 )
+                # OCO: si es pata de CPI straddle, cancelar la pata contraria
+                if "_CPI_" in pos_key:
+                    base  = pos_key.split("_CPI_")[0]
+                    other = "CORTO" if direc == "LARGO" else "LARGO"
+                    cancelled_oco.add(f"{base}_CPI_{other}")
             else:
-                still_open[instrument] = pos
+                still_open[pos_key] = pos
 
         except Exception:
-            still_open[instrument] = pos
+            still_open[pos_key] = pos
+
+    # Eliminar patas OCO canceladas (la que no se activó primero)
+    for k in cancelled_oco:
+        if k in still_open:
+            del still_open[k]
+            log_position(
+                fuente="oco_cancel", instrumento=k, simbolo=k,
+                direccion="", entrada=None, tp=None, sl=None,
+                tamanio=0, leverage=0, horizonte="SCALP",
+                calidad="OCO", modo="AUTO", order_id="",
+                estado="Cancelada por OCO — pata contraria ejecutada",
+            )
 
     _save_open_positions(still_open)
     return closed
@@ -373,6 +406,35 @@ def parse_price(s: str):
     except Exception:
         return None
 
+# ── Volatility-based position sizing ─────────────────────────────────────────
+
+_VOL_SCALAR_MIN = 0.5   # nunca menos de 50% del tamaño base
+_VOL_SCALAR_MAX = 1.5   # nunca más de 150%
+
+def _vol_scalar(symbol: str) -> float:
+    """
+    Compara volatilidad reciente (20 días) vs baseline (20 días previos).
+    Alta vol → scalar < 1 → posición más pequeña.
+    Baja vol → scalar > 1 → posición más grande.
+    Fallback 1.0 si no hay datos suficientes.
+    """
+    try:
+        import ccxt
+        ex = ccxt.bitget({"options": {"defaultType": "swap"}})
+        ohlcv = ex.fetch_ohlcv(symbol, timeframe="1d", limit=42)
+        if len(ohlcv) < 25:
+            return 1.0
+        closes  = [c[4] for c in ohlcv]
+        returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        recent_vol   = statistics.stdev(returns[-20:])
+        baseline_vol = statistics.stdev(returns[-40:-20])
+        if recent_vol <= 0 or baseline_vol <= 0:
+            return 1.0
+        return max(_VOL_SCALAR_MIN, min(_VOL_SCALAR_MAX, baseline_vol / recent_vol))
+    except Exception:
+        return 1.0
+
+
 # ── Ejecución de señal ────────────────────────────────────────────────────────
 
 def execute_signal(instrument: str, direction: str,
@@ -397,8 +459,11 @@ def execute_signal(instrument: str, direction: str,
                      entrada, tp, sl, 0, 0, horizonte, calidad, "SKIP", "", status)
         return status
 
-    # ── Bloquear si ya hay posicion abierta en este instrumento ──────────────
-    if has_open_position(instrument):
+    # CPI straddle: permite LARGO+CORTO simultáneo usando clave compuesta
+    _cpi = fuente == "cpi_straddle"
+    pos_key = f"{instrument}_CPI_{direction.upper()}" if _cpi else instrument
+
+    if not _cpi and has_open_position(instrument):
         status = f"skip — ya hay posicion abierta en {instrument}"
         log_position(fuente, instrument, symbol, direction,
                      entrada, tp, sl, 0, 0, horizonte, calidad, "SKIP", "", status)
@@ -407,6 +472,12 @@ def execute_signal(instrument: str, direction: str,
     cfg      = HORIZON_CFG.get(horizonte.upper(), HORIZON_CFG["DIA"])
     max_usdt = cfg["usdt"]
     leverage = cfg["lev"]
+
+    # Ajuste por volatilidad: mercados nerviosos → posición más pequeña
+    _vs = _vol_scalar(symbol)
+    if abs(_vs - 1.0) > 0.02:
+        max_usdt = round(max_usdt * _vs, 2)
+        print(f"    [vol-σ] {instrument}: scalar {_vs:.2f}x → size ${max_usdt:.2f}")
 
     side      = "buy"  if direction.upper() == "LARGO" else "sell"
     entry_p   = parse_price(entrada) if entrada.upper() not in ("MERCADO","N/A","") else None
@@ -423,9 +494,12 @@ def execute_signal(instrument: str, direction: str,
         log_position(fuente, instrument, symbol, direction,
                      entry_p, tp_p, sl_p, max_usdt, leverage, horizonte,
                      calidad, "PAPER", "", "OK", status)
-        _record_open_position(instrument, symbol, direction,
-                              entry_p or 0, tp_p, sl_p,
-                              max_usdt, leverage, horizonte, "paper")
+        # No registrar si no hay precio válido (evita entry=0 en posiciones paper)
+        if entry_p is not None:
+            _record_open_position(instrument, symbol, direction,
+                                  entry_p, tp_p, sl_p,
+                                  max_usdt, leverage, horizonte, "paper",
+                                  pos_key=pos_key)
         return status
 
     # ── Live mode ───────────────────────────────────────────────────────────
@@ -480,7 +554,8 @@ def execute_signal(instrument: str, direction: str,
                      calidad, "LIVE", order_id, "OK", status)
         _record_open_position(instrument, symbol, direction,
                               fill_p, tp_p, sl_p,
-                              max_usdt, leverage, horizonte, order_id)
+                              max_usdt, leverage, horizonte, order_id,
+                              pos_key=pos_key)
         return status
 
     except Exception as e:
