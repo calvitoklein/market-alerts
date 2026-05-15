@@ -8,3 +8,6 @@ lxml>=4.9.0
 telethon>=1.36.0
 google-generativeai>=0.7.0
 Pillow>=10.0.0
+matplotlib>=3.8.0
+mplfinance>=0.12.10b0
+pandas>=2.0.0

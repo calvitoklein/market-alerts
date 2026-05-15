@@ -1187,6 +1187,23 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     })
                     send_telegram(tg_token, tg_chat,
                         f"⭐ <b>Broker [STAR]:</b> <code>{star_status}</code>")
+                    try:
+                        from chart_generator import send_chart_to_telegram as _chart_star
+                        _chart_star(
+                            token=tg_token, chat_id=tg_chat,
+                            instrument=sig.get("INSTRUMENTO", "BTC"),
+                            direction=sig.get("DIRECCION", ""),
+                            entrada=sig.get("ENTRADA", 0),
+                            tp=sig.get("TP", 0),
+                            sl=sig.get("SL", 0),
+                            caption=(f"⭐ STAR @{handle} | {sig.get('INSTRUMENTO','')} "
+                                     f"{sig.get('DIRECCION','')} | "
+                                     f"Entry {sig.get('ENTRADA','')} | "
+                                     f"TP {sig.get('TP','')} | SL {sig.get('SL','')}"),
+                            title_extra=f"STAR @{handle} | WR {wr:.0%}",
+                        )
+                    except Exception as _ce:
+                        print(f"  [CHART] STAR: {_ce}")
                     alerts += 1
 
     # Limpiar señales antiguas
@@ -1416,6 +1433,21 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     alerts += 1
                 send_telegram(tg_token, tg_chat,
                     f"🤖 <b>CPI Broker:</b> <code>Straddle BTC colocado (2 patas paper)</code>")
+                try:
+                    from chart_generator import send_chart_to_telegram as _chart_cpi
+                    _cpi_long  = next((s for s in _new_cpi if s["DIRECCION"] == "LARGO"), _new_cpi[0])
+                    _chart_cpi(
+                        token=tg_token, chat_id=tg_chat,
+                        instrument="BTC",
+                        direction="LARGO",
+                        entrada=_cpi_long["ENTRADA"],
+                        tp=_cpi_long["TP"],
+                        sl=_cpi_long["SL"],
+                        caption=f"📈 CPI Straddle BTC | Evento macro | WR 33% R:R 2:1",
+                        title_extra="CPI Straddle — ambas patas activas",
+                    )
+                except Exception as _ce:
+                    print(f"  [CHART] CPI: {_ce}")
                 log_event("CPI", f"Straddle BTC colocado — {_cpi_dt.strftime('%Y-%m-%d %H:%M UTC')}", {
                     "buy_stop": _buy_stop, "sell_stop": _sell_stop,
                     "tp_long": _tp_long, "tp_short": _tp_short,
@@ -1470,6 +1502,21 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                     alerts += 1
                 send_telegram(tg_token, tg_chat,
                     f"🤖 <b>FOMC Broker:</b> <code>Straddle BTC colocado (2 patas paper)</code>")
+                try:
+                    from chart_generator import send_chart_to_telegram as _chart_fomc
+                    _fomc_long = next((s for s in _new_fomc if s["DIRECCION"] == "LARGO"), _new_fomc[0])
+                    _chart_fomc(
+                        token=tg_token, chat_id=tg_chat,
+                        instrument="BTC",
+                        direction="LARGO",
+                        entrada=_fomc_long["ENTRADA"],
+                        tp=_fomc_long["TP"],
+                        sl=_fomc_long["SL"],
+                        caption=f"🏛 FOMC Straddle BTC | Evento macro | WR 46% R:R 2:1",
+                        title_extra="FOMC Straddle — ambas patas activas",
+                    )
+                except Exception as _ce:
+                    print(f"  [CHART] FOMC: {_ce}")
                 log_event("FOMC", f"Straddle BTC colocado — {_fomc_dt.strftime('%Y-%m-%d %H:%M UTC')}", {
                     "buy_stop": _f_buy, "sell_stop": _f_sell,
                     "tp_long": _f_tp_long, "btc_ref": _fbtc, "mins_to_fomc": _fmins,
@@ -1610,6 +1657,21 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                 })
                 send_telegram(tg_token, tg_chat,
                     f"🤖 <b>Broker:</b> <code>{broker_status}</code>")
+                try:
+                    from chart_generator import send_chart_to_telegram as _chart_conf
+                    _chart_conf(
+                        token=tg_token, chat_id=tg_chat,
+                        instrument=_c_instr,
+                        direction=_c_direc,
+                        entrada=_c_entrada,
+                        tp=_c_tp,
+                        sl=_c_sl,
+                        caption=(f"🤖 Confluencia | {_c_instr} {_c_direc} | "
+                                 f"Entry {_c_entrada} | TP {_c_tp} | SL {_c_sl}"),
+                        title_extra=f"Confluencia {instrument} | {horizonte}",
+                    )
+                except Exception as _ce:
+                    print(f"  [CHART] Confluencia: {_ce}")
 
     return alerts
 
