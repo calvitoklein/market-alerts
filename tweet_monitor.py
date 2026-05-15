@@ -1247,6 +1247,68 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     except Exception as _e:
         print(f"  [GREENMOOD] Error: {_e}")
 
+    # ── Señales propias: FRVP (Fixed Range Volume Profile BTC/ETH 24/7) ────────
+    try:
+        from frvp_strategy import generate_signals as _frvp_gen
+        for _fv in _frvp_gen():
+            if _fv["id"] not in seen:
+                seen.add(_fv["id"])
+                signals_buffer.append(_fv)
+                from stats import add_pending_signal
+                add_pending_signal(_fv)
+                print(f"  [FRVP] {_fv['INSTRUMENTO']} {_fv['DIRECCION']} @ {_fv['ENTRADA']} | {_fv['RESUMEN']}")
+                log_event("SIGNAL", f"@{_fv['handle']}: {_fv['INSTRUMENTO']} {_fv['DIRECCION']} entrada={_fv['ENTRADA']}", {
+                    "handle": _fv["handle"], "name": _fv["name"],
+                    "instrumento": _fv["INSTRUMENTO"], "direccion": _fv["DIRECCION"],
+                    "entrada": _fv["ENTRADA"], "tp": _fv["TP"], "sl": _fv["SL"],
+                    "horizonte": _fv["HORIZONTE"], "confianza": _fv["CONFIANZA_TRADER"],
+                })
+                send_telegram(tg_token, tg_chat, (
+                    f"📊 <b>FRVP Signal</b> — {_fv['INSTRUMENTO']} <b>{_fv['DIRECCION']}</b>\n"
+                    f"<pre>"
+                    f"Entry  {_fv['ENTRADA']:>12}\n"
+                    f"TP     {_fv['TP']:>12}  (POC)\n"
+                    f"SL     {_fv['SL']:>12}\n"
+                    f"VAH    {_fv.get('_vah', '?'):>12.2f}\n"
+                    f"VAL    {_fv.get('_val', '?'):>12.2f}"
+                    f"</pre>\n"
+                    f"<i>{_fv['RESUMEN']}</i>"
+                ))
+                try:
+                    from chart_generator import send_chart_to_telegram as _chart_frvp
+                    _chart_frvp(
+                        token=tg_token, chat_id=tg_chat,
+                        instrument=_fv["INSTRUMENTO"],
+                        direction=_fv["DIRECCION"],
+                        entrada=_fv["ENTRADA"],
+                        tp=_fv["TP"],
+                        sl=_fv["SL"],
+                        poc=_fv.get("_poc"),
+                        vah=_fv.get("_vah"),
+                        val=_fv.get("_val"),
+                        caption=f"📊 FRVP {_fv['INSTRUMENTO']} {_fv['DIRECCION']} | {_fv['RESUMEN']}",
+                        title_extra="FRVP Pullback al Value Area",
+                    )
+                except Exception as _ce:
+                    print(f"  [CHART] FRVP: {_ce}")
+                from broker import execute_signal as _exec_frvp
+                _frvp_status = _exec_frvp(
+                    instrument=_fv["INSTRUMENTO"],
+                    direction=_fv["DIRECCION"],
+                    entrada=_fv["ENTRADA"],
+                    tp=_fv["TP"],
+                    sl=_fv["SL"],
+                    calidad=_fv["CONFIANZA_TRADER"],
+                    horizonte=_fv["HORIZONTE"],
+                    fuente="frvp_strategy",
+                )
+                print(f"    -> [FRVP] BROKER: {_frvp_status}")
+                send_telegram(tg_token, tg_chat,
+                    f"🤖 <b>FRVP Broker:</b> <code>{_frvp_status}</code>")
+                alerts += 1
+    except Exception as _e:
+        print(f"  [FRVP] Error: {_e}")
+
     # ── Mensajes en tiempo real de Telegram (texto + imágenes) ──────────────
     # El listener permanente drena aquí mensajes publicados desde el último ciclo.
     # Al ser tiempo real, el precio de entrada siempre coincide con el precio actual.
