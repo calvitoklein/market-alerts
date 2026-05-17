@@ -1,1 +1,1 @@
-web: python session_server.py
+worker: python session_server.py
