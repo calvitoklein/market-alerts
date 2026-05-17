@@ -1,1 +1,1 @@
-worker: python tweet_monitor.py --loop
+worker: python session_server.py
