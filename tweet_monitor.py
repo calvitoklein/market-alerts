@@ -992,6 +992,29 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
     alerts = 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # ── Seasonality: cierre por tiempo a las 23:00 UTC ───────────────────────
+    _now_utc = datetime.now(timezone.utc)
+    try:
+        from intraday_season_strategy import should_exit as _sea_exit, mark_closed as _sea_mark_closed
+        from broker import close_position_manual as _close_manual
+        if _sea_exit(_now_utc):
+            _cr = _close_manual("BTC", "TIME_EXIT_23h")
+            _sea_mark_closed()
+            emoji_c = "✅" if _cr["pnl_pct"] >= 0 else "🛑"
+            send_telegram(tg_token, tg_chat, (
+                f"{emoji_c} <b>Seasonality BTC — Cierre 23h UTC</b>\n"
+                f"PnL: <b>{_cr['pnl_pct']:+.2f}%</b> | "
+                f"Salida: {_cr['exit_price']:.2f}\n"
+                f"<code>{_cr['status']}</code>"
+            ))
+            print(f"  [SEASON] Cierre 23h → {_cr['pnl_pct']:+.2f}%")
+            log_event("CLOSE", f"Seasonality BTC cierre TIME_EXIT_23h {_cr['pnl_pct']:+.2f}%", {
+                "instrument": "BTC", "pnl_pct": _cr["pnl_pct"],
+                "exit_price": _cr["exit_price"], "reason": "TIME_EXIT_23h",
+            })
+    except Exception as _se:
+        print(f"  [SEASON] Error cierre: {_se}")
+
     # Verificar si alguna posicion abierta ya alcanzo TP o SL
     from broker import check_position_exits
     closed = check_position_exits()
@@ -1308,6 +1331,48 @@ def run_signal_cycle(signal_accounts, client, tg_token, tg_chat,
                 alerts += 1
     except Exception as _e:
         print(f"  [FRVP] Error: {_e}")
+
+    # ── Señales propias: BTC Intraday Seasonality (21h→23h UTC) ──────────────
+    try:
+        from intraday_season_strategy import should_enter as _sea_enter, get_entry_signal as _sea_sig
+        if _sea_enter(_now_utc):
+            _sv = _sea_sig(_now_utc)
+            if _sv and _sv["id"] not in seen:
+                seen.add(_sv["id"])
+                signals_buffer.append(_sv)
+                from stats import add_pending_signal
+                add_pending_signal(_sv)
+                print(f"  [SEASON] BTC LARGO @ MERCADO | 21h→23h UTC | SL {_sv['SL']}")
+                log_event("SIGNAL", f"Seasonality BTC LARGO @ MERCADO 21h-23h UTC", {
+                    "handle": _sv["handle"], "instrumento": "BTC",
+                    "direccion": "LARGO", "horizonte": "SCALP",
+                })
+                send_telegram(tg_token, tg_chat, (
+                    f"⏰ <b>Seasonality BTC</b> — LARGO @ MERCADO\n"
+                    f"<pre>"
+                    f"Ventana  21:00→23:00 UTC\n"
+                    f"SL       {_sv['SL']}\n"
+                    f"Cierre   Automático a las 23h\n"
+                    f"Edge     Sharpe 2.23 | WR 54.5% | DD -7.6%"
+                    f"</pre>"
+                ))
+                from broker import execute_signal as _exec_sea
+                _sea_status = _exec_sea(
+                    instrument=_sv["INSTRUMENTO"],
+                    direction=_sv["DIRECCION"],
+                    entrada=_sv["ENTRADA"],
+                    tp=_sv["TP"],
+                    sl=_sv["SL"],
+                    calidad=_sv["CONFIANZA_TRADER"],
+                    horizonte=_sv["HORIZONTE"],
+                    fuente="intraday_seasonality",
+                )
+                print(f"    -> [SEASON] BROKER: {_sea_status}")
+                send_telegram(tg_token, tg_chat,
+                    f"🤖 <b>Seasonality Broker:</b> <code>{_sea_status}</code>")
+                alerts += 1
+    except Exception as _e:
+        print(f"  [SEASON] Error entrada: {_e}")
 
     # ── Mensajes en tiempo real de Telegram (texto + imágenes) ──────────────
     # El listener permanente drena aquí mensajes publicados desde el último ciclo.

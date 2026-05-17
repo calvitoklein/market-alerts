@@ -653,6 +653,80 @@ def execute_insider_signal(ticker: str, trader: str, amount: str,
         return f"ERROR broker insider — {e}"
 
 
+# ── Cierre manual por tiempo ──────────────────────────────────────────────────
+
+def close_position_manual(instrument: str, reason: str = "TIME_EXIT") -> dict:
+    """
+    Cierra a mercado una posición abierta por razón temporal (no TP/SL).
+    Devuelve dict con: status, pnl_pct, exit_price, instrument, direction.
+    """
+    positions = _load_open_positions()
+    pos_key   = instrument.upper()
+
+    if pos_key not in positions:
+        return {"status": f"skip — no hay posicion abierta en {instrument}",
+                "pnl_pct": 0.0, "exit_price": 0.0,
+                "instrument": instrument, "direction": ""}
+
+    pos       = positions[pos_key]
+    symbol    = pos.get("symbol", "")
+    direction = pos.get("direction", "LARGO")
+    entry     = pos.get("entry") or 0.0
+
+    # Obtener precio de salida
+    try:
+        import ccxt as _ccxt
+        if instrument.upper() in ("BTC", "ETH"):
+            _ex = _ccxt.binance({"options": {"defaultType": "spot"}})
+            price = _ex.fetch_ticker(f"{instrument.upper()}/USDT")["last"]
+        else:
+            _ex = _ccxt.bitget({"options": {"defaultType": "swap"}})
+            price = _ex.fetch_ticker(symbol)["last"]
+    except Exception:
+        price = entry
+
+    pnl_pct = ((price - entry) / entry * 100) if direction == "LARGO" else \
+              ((entry - price) / entry * 100) if entry > 0 else 0.0
+    pnl_pct = round(pnl_pct, 4)
+
+    if not TRADE_ENABLED:
+        status = (f"[PAPER-CLOSE] {reason} | {instrument} "
+                  f"entrada {entry:.2f} → salida {price:.2f} | PnL {pnl_pct:+.2f}%")
+    else:
+        ex = _get_exchange()
+        if ex:
+            try:
+                side = "sell" if direction == "LARGO" else "buy"
+                # Cancelar órdenes abiertas (TP/SL pendientes)
+                try:
+                    ex.cancel_all_orders(symbol)
+                except Exception:
+                    pass
+                # Cerrar usando reduceOnly + market
+                qty = pos.get("tamanio", 10) * pos.get("leverage", 5) / price
+                qty = round(qty, 6)
+                ex.create_market_order(symbol, side, qty, {"reduceOnly": True})
+                status = (f"CLOSE | {reason} | {instrument} "
+                          f"entrada {entry:.2f} → salida {price:.2f} | PnL {pnl_pct:+.2f}%")
+            except Exception as _e:
+                status = f"ERROR close: {_e}"
+        else:
+            status = "ERROR — exchange no configurado"
+
+    # Eliminar de posiciones abiertas
+    del positions[pos_key]
+    _save_open_positions(positions)
+
+    return {
+        "status":     status,
+        "pnl_pct":    pnl_pct,
+        "exit_price": price,
+        "instrument": instrument,
+        "direction":  direction,
+        "reason":     reason,
+    }
+
+
 # ── Registro de operación insider (solo log, sin ejecutar orden) ──────────────
 
 def log_insider_trade(fuente, ticker, trader, amount, trade_date, notes=""):
